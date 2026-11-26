@@ -80,9 +80,9 @@ mod tests {
     #[test]
     fn counts_characters_not_utf8_bytes() {
         assert!(Title::try_from(String::new()).is_err());
-        assert!(Title::try_from("猫".repeat(100)).is_ok());
-        assert!(Title::try_from("猫".repeat(101)).is_err());
-        assert!(Description::try_from("猫".repeat(1000)).is_ok());
-        assert!(Description::try_from("猫".repeat(1001)).is_err());
+        assert!(Title::try_from("é".repeat(100)).is_ok());
+        assert!(Title::try_from("é".repeat(101)).is_err());
+        assert!(Description::try_from("é".repeat(1000)).is_ok());
+        assert!(Description::try_from("é".repeat(1001)).is_err());
     }
 }

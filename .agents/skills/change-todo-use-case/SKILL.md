@@ -1,13 +1,13 @@
 ---
 name: change-todo-use-case
-description: dddrs の Todo の振る舞いや HTTP 操作を追加・変更するときに、層の境界を保ち、適切なテストを選ぶ手順。
+description: Use when adding or changing Todo behavior or HTTP operations in dddrs. Keep domain rules inside their crate and test the affected boundaries.
 ---
 
-# Todo の操作を変更する
+# Change a Todo use case
 
-1. 対象操作を README の API 表で確認する。dddpy と揃える項目（状態・ステータスコード・文字数・一覧順）と、Rust の型で表せる条件を切り分ける。
-2. 業務ルールは `crates/domain` に置く。値の検証は newtype の生成時に行う。編集は `&mut self`、型の変わる遷移は `self` を消費するメソッドにする。新たに禁止した操作には `compile_fail` の例を付ける。
-3. `application` には読み出し・ドメイン操作・保存の順序だけを書く。既存のリポジトリ操作で足りるなら trait を増やさない。永続化を変える場合は `infrastructure` の行変換とマイグレーションをそろえ、版番号による競合検出を保つ。
-4. 入力・出力・HTTP エラーは `presentation` で変換する。具体的なリポジトリの組み立ては `server` に限定する。
-5. 正常系と失敗時に保存されないことを確認する。層内のテストに加え、HTTP の契約が変わる場合は `crates/server/tests/http.rs` と README の例を更新する。
-6. `cargo fmt --all --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked` を実行する。依存方向のテストが落ちたら、許可リストを広げる前に責務の置き場所を見直す。
+1. Check the README's API table. Identify which behavior must match dddpy (lifecycle, status codes, character limits, list order) and which constraints can be expressed in Rust's types.
+2. Put business rules in `crates/domain`. Validate newtypes on construction. Edit through `&mut self`; consume `self` for transitions that change the type. Add a `compile_fail` example for a newly prohibited call.
+3. Keep `application` focused on loading, invoking the domain, and saving. Reuse existing repository methods when possible. For storage changes, update the row conversion and migration in `infrastructure` and preserve version checks for concurrent writes.
+4. Translate input, output, and HTTP errors in `presentation`. Wire concrete repository implementations only in `server`.
+5. Test the successful operation and verify that rejected operations do not persist changes. If the HTTP contract changes, update `crates/server/tests/http.rs` and the README examples. Write documentation, comments, and skills in English; keep `README.ja_JP.md` in sync as a translation.
+6. Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked`. If the dependency test fails, reconsider where the behavior belongs before widening the allowlist.

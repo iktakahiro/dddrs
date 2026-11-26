@@ -47,11 +47,11 @@ impl Todo<NotStarted> {
         )
     }
 
-    /// 開始前の値を消費するので、同じ値をもう一度開始することはできない。
+    /// Consume the pending Todo so the same value cannot be started twice.
     ///
     /// ```compile_fail,E0382
     /// use domain::{Title, Todo};
-    /// let todo = Todo::new(Title::try_from(String::from("買い物")).unwrap(), None);
+    /// let todo = Todo::new(Title::try_from(String::from("Buy groceries")).unwrap(), None);
     /// let started = todo.start();
     /// todo.start();
     /// ```
@@ -62,11 +62,11 @@ impl Todo<NotStarted> {
 }
 
 impl Todo<InProgress> {
-    /// 未開始の型にはこのメソッドがない。
+    /// Complete an in-progress Todo. A pending Todo has no such method.
     ///
     /// ```compile_fail,E0599
     /// use domain::{Title, Todo};
-    /// let todo = Todo::new(Title::try_from(String::from("買い物")).unwrap(), None);
+    /// let todo = Todo::new(Title::try_from(String::from("Buy groceries")).unwrap(), None);
     /// todo.complete();
     /// ```
     pub fn complete(mut self) -> Todo<Completed> {
@@ -86,7 +86,7 @@ pub enum TransitionError {
     AlreadyCompleted,
 }
 
-/// DB から読み出すまで状態が分からない Todo を表す。
+/// A Todo whose state is not known until it is loaded.
 #[derive(Debug)]
 pub enum StoredTodo {
     NotStarted(Todo<NotStarted>),

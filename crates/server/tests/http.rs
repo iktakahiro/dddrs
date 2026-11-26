@@ -56,7 +56,7 @@ async fn edits_starts_completes_and_reopens_the_database() {
     let dir = tempfile::tempdir().unwrap();
     let url = format!("sqlite://{}", dir.path().join("todos.db").display());
     let first = app(&url).await;
-    let todo = create(&first, "買い物").await;
+    let todo = create(&first, "Buy groceries").await;
     let path = format!("/todos/{}", todo["id"].as_str().unwrap());
     assert_eq!(todo["status"], "not_started");
     assert_eq!(todo["description"], "");
@@ -67,12 +67,12 @@ async fn edits_starts_completes_and_reopens_the_database() {
         &first,
         Method::PUT,
         &path,
-        Some(json!({"title":"夕飯の買い物", "description":"野菜を買う"})),
+        Some(json!({"title":"Buy groceries for dinner", "description":"Pick up vegetables"})),
         StatusCode::OK,
     )
     .await;
-    assert_eq!(updated["title"], "夕飯の買い物");
-    assert_eq!(updated["description"], "野菜を買う");
+    assert_eq!(updated["title"], "Buy groceries for dinner");
+    assert_eq!(updated["description"], "Pick up vegetables");
     let start = format!("{path}/start");
     let complete = format!("{path}/complete");
     request(
@@ -154,8 +154,8 @@ async fn invalid_values_do_not_write_and_missing_ids_return_not_found() {
         json!({}),
         json!({"title": 123}),
         json!({"title":""}),
-        json!({"title":"猫".repeat(101)}),
-        json!({"title":"a", "description":"本".repeat(1001)}),
+        json!({"title":"é".repeat(101)}),
+        json!({"title":"a", "description":"é".repeat(1001)}),
     ] {
         let error = request(
             &app,

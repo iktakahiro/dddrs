@@ -1,85 +1,87 @@
 # dddrs
 
-[dddpy](https://github.com/iktakahiro/dddpy) の Todo API を Rust・axum・SQLite で実装した、DDD とオニオンアーキテクチャのサンプル。題材は「未開始の Todo は完了できない」というルール。Rust では、状態が分かっているときは**コンパイル時**に、不明なときは**読み出し後**にこのルールを守れる。
+English | [日本語](README.ja_JP.md)
 
-## 動かす
+A Rust, axum, and SQLite implementation of the [dddpy](https://github.com/iktakahiro/dddpy) Todo API. The example follows one domain rule: **a Todo must be started before it can be completed**. When its state is known, Rust enforces the rule at compile time. When the state comes from a database row, the domain checks it at runtime.
 
-[Rust の stable ツールチェーン](https://rustup.rs/) と C コンパイラがあれば、SQLite サーバーや sqlx-cli のインストールは不要。
+## Run the API
+
+Install [stable Rust](https://rustup.rs/) and a C compiler. You don't need a separate SQLite server or the sqlx CLI.
 
 ```sh
 cargo run --locked -p server
 ```
 
-起動時にカレントディレクトリに `todos.db` を作り、マイグレーションを適用する。接続先は `DATABASE_URL`（既定: `sqlite://todos.db`）、待受先は `BIND_ADDR`（既定: `127.0.0.1:3000`）で変えられる。
+The server creates `todos.db` in the working directory and runs migrations on startup. Set `DATABASE_URL` to change the database (default: `sqlite://todos.db`) or `BIND_ADDR` to change the listener (default: `127.0.0.1:3000`).
 
-別のターミナルで以下を実行する（ID の取り出しに `jq` を使用）。
+In a second terminal, create a Todo and try completing it before and after starting it. The example uses `jq` to read the ID.
 
 ```sh
 base=http://127.0.0.1:3000/todos
 id=$(curl -fsS "$base" -H 'Content-Type: application/json' \
-  -d '{"title":"夕飯の買い物","description":"野菜を買う"}' | jq -r .id)
-curl -sS -i -X PATCH "$base/$id/complete"  # まだ開始していないので 400
+  -d '{"title":"Buy groceries","description":"Pick up vegetables"}' | jq -r .id)
+curl -sS -i -X PATCH "$base/$id/complete"  # 400: not started yet
 curl -fsS -X PATCH "$base/$id/start"       # in_progress
 curl -fsS -X PATCH "$base/$id/complete"    # completed
 curl -fsS "$base/$id"
 ```
 
-## 1リクエストを追う
+## Follow a request
 
-たとえば `PATCH /todos/{id}/start` は次の順に進む。**実行時の呼び出し順と、クレートの依存方向は異なる。**
+Trace `PATCH /todos/{id}/start` to see why **runtime calls and compile-time dependencies point in different directions**:
 
-1. [presentation](crates/presentation/src/lib.rs) が HTTP を受け、[extractor](crates/presentation/src/extract.rs) がパスを `TodoId` に変換する。
-2. [application](crates/application/src/lib.rs) の `TodoService::start` が [リポジトリの trait](crates/domain/src/repository.rs) 経由で Todo を読み、[domain](crates/domain/src/todo.rs) に状態遷移を依頼する。
-3. [infrastructure](crates/infrastructure/src/lib.rs) が同じ trait の実装として、sqlx で変更を保存する。読み出し時の版番号を更新条件に含めるので、後から来た古い更新が完了状態を巻き戻すことはない。
-4. presentation が結果を JSON に変換する。どの実装を使うかは、起動時に [server](crates/server/src/main.rs) が一度だけ決める。
+1. The [presentation handler](crates/presentation/src/lib.rs) receives the request. Its [extractor](crates/presentation/src/extract.rs) parses the path into a `TodoId`.
+2. In [application](crates/application/src/lib.rs), `TodoService::start` reads the Todo through the [repository trait](crates/domain/src/repository.rs) and asks the [domain](crates/domain/src/todo.rs) to start it.
+3. The [infrastructure adapter](crates/infrastructure/src/lib.rs) implements that trait with sqlx. The update only succeeds if the stored version still matches the one read, so a stale write cannot undo a later transition.
+4. Presentation converts the result to JSON. Only the [server](crates/server/src/main.rs) chooses the concrete repository, once at startup.
 
-| クレート | 直接依存するワークスペース内のクレート |
+| Crate | Direct workspace dependencies |
 | --- | --- |
-| domain | なし |
+| domain | None |
 | application | domain |
 | infrastructure | domain |
-| presentation | application、domain |
-| server（起動・配線） | presentation、application、infrastructure |
+| presentation | application, domain |
+| server (startup and wiring) | presentation, application, infrastructure |
 
-クレートは Go のパッケージのように `use` で参照するが、別クレートを使うには自身の `Cargo.toml` に依存宣言が必要。たとえば application から `infrastructure::SqliteTodoRepository` を参照してもコンパイルできない。マニフェストに依存を書き足して境界を緩めた場合も、[依存方向のテスト](crates/server/tests/layers.rs) が検出する。
+Each crate declares its dependencies in its own `Cargo.toml`. Importing `infrastructure::SqliteTodoRepository` from application fails to compile because infrastructure isn't a declared dependency. The [dependency test](crates/server/tests/layers.rs) also catches an attempt to relax the boundary by adding it to the manifest.
 
-## Rust が何を保証するか
+## What Rust enforces
 
 ```rust
 use domain::{Title, Todo};
 
-let title = Title::try_from(String::from("夕飯の買い物")).unwrap();
+let title = Title::try_from(String::from("Buy groceries")).unwrap();
 let pending = Todo::new(title, None);   // Todo<NotStarted>
-// pending.complete();                 // この型には complete がない
-let active = pending.start();          // 所有権を渡して Todo<InProgress> を受け取る
-// pending.start();                    // 以前の値はもう使えない
-let done = active.complete();          // Todo<Completed> に完了時刻が入る
+// pending.complete();                 // No such method on this type.
+let active = pending.start();          // Moves pending; returns Todo<InProgress>.
+// pending.start();                    // The previous value is no longer available.
+let done = active.complete();          // Todo<Completed> carries the completion time.
 ```
 
-| dddpy の表現 | dddrs の表現とその理由 |
+| In dddpy | In dddrs |
 | --- | --- |
-| 値オブジェクトは frozen dataclass | [Title・Description・TodoId](crates/domain/src/values.rs) は非公開フィールドを持つ newtype。TypeScript の型エイリアスとは違い、文字列や別の値オブジェクトをそのまま渡せない。長さや UUID の形式は入力時に検証する。 |
-| エンティティのメソッドが状態を書き換える | 内容の編集は `&mut self`（排他的な借用）。状態の型が変わる遷移は `self` を消費して新しい型を返す。上のコメントアウトした誤用は `compile_fail` テストで確認できる。 |
-| DB の値を読み、状態を条件分岐で検査 | DB の行や HTTP 入力までコンパイラが保証するわけではない。[行からの復元](crates/infrastructure/src/row.rs)で3状態を表す enum `StoredTodo` を作り、`match` で分岐してから型付きの遷移に委譲する。 |
-| Protocol でリポジトリを差し替える | trait は Go の interface に近いが、実装側で `impl TodoRepository for ...` を宣言する。`Arc<dyn TodoRepository>` は複数リクエストで共有できる trait オブジェクト。`async_trait` により非同期メソッドもこの境界から呼べる。 |
+| Value objects are frozen dataclasses. | [Title, Description, and TodoId](crates/domain/src/values.rs) are newtypes with private fields. Unlike TypeScript type aliases, they're distinct types: a raw string or a description can't stand in for a title. Input length and UUID syntax still need runtime validation. |
+| Entity methods mutate the Todo. | Editing takes an exclusive borrow (`&mut self`). A transition that changes the type takes ownership (`self`) and returns the new type. Compile-fail tests cover the two invalid calls above. |
+| The domain branches on the state read from storage. | The compiler can't know the contents of a row. The [row conversion](crates/infrastructure/src/row.rs) builds a `StoredTodo` enum; a `match` selects one of its three variants before calling the typed transition. |
+| A Protocol lets the application swap repository implementations. | A trait plays a similar role to a Go interface, except the adapter explicitly declares `impl TodoRepository for ...`. Requests share the implementation through `Arc<dyn TodoRepository>`; `async_trait` makes its asynchronous methods callable through this trait object. |
 
 ## API
 
-| メソッド | パス | 内容 | 成功 |
+| Method | Path | Operation | Success |
 | --- | --- | --- | --- |
-| POST | `/todos` | 作成 | 201 |
-| GET | `/todos` | 作成日時の降順、最新20件 | 200 |
-| GET | `/todos/{id}` | 1件取得 | 200 |
-| PUT | `/todos/{id}` | タイトル・説明を置換 | 200 |
-| PATCH | `/todos/{id}/start` | 未開始 → 進行中 | 200 |
-| PATCH | `/todos/{id}/complete` | 進行中 → 完了 | 200 |
-| DELETE | `/todos/{id}` | 削除 | 204（本文なし） |
+| POST | `/todos` | Create | 201 |
+| GET | `/todos` | List the latest 20, newest first | 200 |
+| GET | `/todos/{id}` | Get one | 200 |
+| PUT | `/todos/{id}` | Replace title and description | 200 |
+| PATCH | `/todos/{id}/start` | Not started → in progress | 200 |
+| PATCH | `/todos/{id}/complete` | In progress → completed | 200 |
+| DELETE | `/todos/{id}` | Delete | 204 (no body) |
 
-POST・PUT の本文には `title`（1〜100文字）が必須。`description`（最大1,000文字）は省略可能で、PUT で省略すると説明を消す。レスポンスでは説明なしを空文字、時刻を Unix エポックからのミリ秒、未完了の `completed_at` を `null` で返す。
+POST and PUT require a `title` (1–100 characters). The `description` is optional (up to 1,000 characters); omitting it on PUT clears it. Responses use an empty string for a missing description, Unix timestamps in milliseconds, and `null` for `completed_at` until completion.
 
-不正な状態遷移は 400、対象が存在しないときは 404、並行更新の競合は 409、UUID や値の検証エラーは 422。競合時は最新の Todo を読み直す。
+An invalid transition returns 400, a missing Todo 404, a conflicting write 409, and an invalid UUID or field value 422. After a conflict, read the latest Todo before trying again.
 
-## 検証
+## Verify
 
 ```sh
 cargo fmt --all --check
@@ -87,4 +89,4 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-テストは開発用 DB を使わない。状態遷移の型エラーだけを試すには `cargo test -p domain --doc`、HTTP から SQLite への保存と再接続を追うには [HTTP 統合テスト](crates/server/tests/http.rs) を参照。
+Tests do not touch the development database. Run `cargo test -p domain --doc` for just the compile-fail examples, or read the [HTTP integration tests](crates/server/tests/http.rs) to follow a Todo through persistence and a database reopen.
