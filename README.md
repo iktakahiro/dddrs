@@ -273,6 +273,16 @@ Test coverage by layer:
 
 All tests use temporary or in-memory SQLite databases and never touch your local `todos.db`.
 
+### End-to-End HTTP Tests (Hurl)
+
+The regular integration suite calls the axum `Router` in-process. To exercise the built `server` binary over a real TCP connection, [install Hurl](https://hurl.dev/docs/installation.html) (CI uses `8.0.1`) and run:
+
+```sh
+cargo test --locked -p server --test e2e -- --ignored --nocapture
+```
+
+The test starts the server on an ephemeral loopback port with a temporary SQLite database, executes [`crates/server/tests/e2e/todos.hurl`](crates/server/tests/e2e/todos.hurl) (covering creation, premature completion rejection, update, start, complete, list, delete, and 404 after deletion), and stops the server on exit. The standard workspace test command skips this external-tool test; CI runs it explicitly.
+
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.

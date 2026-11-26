@@ -273,6 +273,16 @@ cargo test --workspace --locked
 
 すべてのテストは一時 DB またはインメモリ SQLite を使用するため、ローカルの `todos.db` には影響しません。
 
+### HTTP E2E テスト（Hurl）
+
+通常の統合テストは同一プロセス内で axum の `Router` を直接呼び出します。ビルド済みバイナリに対して実際の TCP 接続でリクエストを送るには、[Hurl をインストール](https://hurl.dev/docs/installation.html)（CI では `8.0.1` を使用）したうえで次を実行します。
+
+```sh
+cargo test --locked -p server --test e2e -- --ignored --nocapture
+```
+
+テスト実行時に一時 SQLite データベースと空いているループバックポートでサーバーを起動し、[`crates/server/tests/e2e/todos.hurl`](crates/server/tests/e2e/todos.hurl) のシナリオ（作成・未開始完了の拒否・更新・開始・完了・一覧・削除・削除後の 404）を検証したあと、終了時にサーバーを自動停止します。通常のワークスペーステストでは Hurl は不要で、CI がこのテストを明示的に実行します。
+
 ## ライセンス
 
 このプロジェクトは MIT ライセンスのもとで公開されています。詳細は [LICENSE](LICENSE) を参照してください。
