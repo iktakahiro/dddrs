@@ -1,5 +1,5 @@
 use super::row::TodoRow;
-use crate::sqlite::storage;
+use crate::sqlite::sqlite_error;
 use async_trait::async_trait;
 use domain::{
     error::RepositoryError,
@@ -43,7 +43,7 @@ impl TodoRepository for SqliteTodoRepository<'_> {
         .bind(todo.completed_at().map(|at| at.timestamp_millis()))
         .execute(&mut **self.tx)
         .await
-        .map_err(storage)?;
+        .map_err(sqlite_error)?;
         Ok(())
     }
 
@@ -53,7 +53,7 @@ impl TodoRepository for SqliteTodoRepository<'_> {
             .bind(id.to_string())
             .fetch_optional(&mut **self.tx)
             .await
-            .map_err(storage)?
+            .map_err(sqlite_error)?
             .map(Snapshot::try_from)
             .transpose()
     }
@@ -66,7 +66,7 @@ impl TodoRepository for SqliteTodoRepository<'_> {
             .bind(i64::from(limit))
             .fetch_all(&mut **self.tx)
             .await
-            .map_err(storage)?
+            .map_err(sqlite_error)?
             .into_iter()
             .map(|row| Ok(Snapshot::try_from(row)?.todo))
             .collect()
@@ -85,7 +85,7 @@ impl TodoRepository for SqliteTodoRepository<'_> {
         .bind(expected_version)
         .execute(&mut **self.tx)
         .await
-        .map_err(storage)?;
+        .map_err(sqlite_error)?;
         if result.rows_affected() == 0 {
             return Err(RepositoryError::Conflict);
         }
@@ -97,7 +97,7 @@ impl TodoRepository for SqliteTodoRepository<'_> {
             .bind(id.to_string())
             .execute(&mut **self.tx)
             .await
-            .map_err(storage)?;
+            .map_err(sqlite_error)?;
         Ok(result.rows_affected() == 1)
     }
 }

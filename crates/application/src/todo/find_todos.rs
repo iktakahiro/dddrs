@@ -27,7 +27,7 @@ impl FindTodosUseCaseImpl {
 #[async_trait]
 impl FindTodosUseCase for FindTodosUseCaseImpl {
     async fn execute(&self) -> Result<Vec<Todo>, UseCaseError> {
-        let mut uow = self.uow_factory.begin().await?;
+        let mut uow = self.uow_factory.begin_read().await?;
         let todos = uow.todos().find_latest(DEFAULT_LIST_LIMIT).await;
         let _ = uow.rollback().await;
         Ok(todos?)

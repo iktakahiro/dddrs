@@ -193,3 +193,42 @@ async fn invalid_values_do_not_write_and_missing_ids_return_not_found() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn concurrent_start_requests_on_wal_never_return_500() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}",
+        dir.path().join("concurrent_http.db").display()
+    );
+    let app = app(&url).await;
+    let todo = create(&app, "Race start").await;
+    let start_path = format!("/todos/{}/start", todo["id"].as_str().unwrap());
+
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let router = app.clone();
+        let path = start_path.clone();
+        tasks.spawn(async move {
+            let req = Request::builder()
+                .method(Method::PATCH)
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            router.oneshot(req).await.unwrap().status()
+        });
+    }
+
+    let mut ok = 0usize;
+    let mut bad_request = 0usize;
+    while let Some(result) = tasks.join_next().await {
+        match result.unwrap() {
+            StatusCode::OK => ok += 1,
+            StatusCode::BAD_REQUEST => bad_request += 1,
+            other => panic!("unexpected status under concurrent WAL writes: {other}"),
+        }
+    }
+
+    assert_eq!(ok, 1);
+    assert_eq!(bad_request, 7);
+}

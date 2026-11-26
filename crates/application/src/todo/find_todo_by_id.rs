@@ -24,7 +24,7 @@ impl FindTodoByIdUseCaseImpl {
 #[async_trait]
 impl FindTodoByIdUseCase for FindTodoByIdUseCaseImpl {
     async fn execute(&self, id: TodoId) -> Result<Todo, UseCaseError> {
-        let mut uow = self.uow_factory.begin().await?;
+        let mut uow = self.uow_factory.begin_read().await?;
         let found = uow.todos().find_by_id(id).await;
         let _ = uow.rollback().await;
         found?

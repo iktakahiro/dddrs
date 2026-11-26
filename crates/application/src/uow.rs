@@ -24,5 +24,19 @@ pub trait UnitOfWork: Send {
 /// Factory that begins a new transactional [`UnitOfWork`].
 #[async_trait]
 pub trait UnitOfWorkFactory: Send + Sync {
+    /// Begin a write-capable transaction.
+    ///
+    /// Implementations backed by SQLite WAL should acquire the write lock up
+    /// front (`BEGIN IMMEDIATE`) so concurrent read-then-write updates wait for
+    /// `busy_timeout` instead of failing immediately with `SQLITE_BUSY_SNAPSHOT`.
     async fn begin(&self) -> Result<Box<dyn UnitOfWork>, RepositoryError>;
+
+    /// Begin a read-only transaction snapshot.
+    ///
+    /// Defaults to [`begin`](Self::begin); database backends such as SQLite WAL
+    /// override this with a deferred read transaction so concurrent readers do
+    /// not contend for the writer lock.
+    async fn begin_read(&self) -> Result<Box<dyn UnitOfWork>, RepositoryError> {
+        self.begin().await
+    }
 }

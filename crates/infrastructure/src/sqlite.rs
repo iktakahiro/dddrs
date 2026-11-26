@@ -10,6 +10,9 @@ use sqlx::{
 };
 use std::{error::Error, time::Duration};
 
+const SQLITE_BUSY: &str = "5";
+const SQLITE_BUSY_SNAPSHOT: &str = "517";
+
 /// Open a SQLite pool with foreign keys, WAL mode, and migrations applied.
 pub async fn connect(url: &str) -> Result<SqlitePool, sqlx::Error> {
     let options = url
@@ -37,6 +40,21 @@ pub(crate) fn storage(error: impl Error + Send + Sync + 'static) -> RepositoryEr
     RepositoryError::Storage(Box::new(error))
 }
 
+/// Map SQLx errors to `RepositoryError`, translating SQLite lock/snapshot
+/// contention (`SQLITE_BUSY` / `SQLITE_BUSY_SNAPSHOT`) into `Conflict` instead
+/// of surfacing an internal 500 error.
+pub(crate) fn sqlite_error(error: sqlx::Error) -> RepositoryError {
+    if let sqlx::Error::Database(ref db_error) = error
+        && matches!(
+            db_error.code().as_deref(),
+            Some(SQLITE_BUSY | SQLITE_BUSY_SNAPSHOT)
+        )
+    {
+        return RepositoryError::Conflict;
+    }
+    RepositoryError::Storage(Box::new(error))
+}
+
 /// SQLite-backed implementation of [`UnitOfWorkFactory`].
 #[derive(Clone)]
 pub struct SqliteUnitOfWorkFactory {
@@ -57,7 +75,16 @@ pub struct SqliteUnitOfWork {
 #[async_trait]
 impl UnitOfWorkFactory for SqliteUnitOfWorkFactory {
     async fn begin(&self) -> Result<Box<dyn UnitOfWork>, RepositoryError> {
-        let tx = self.pool.begin().await.map_err(storage)?;
+        let tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(sqlite_error)?;
+        Ok(Box::new(SqliteUnitOfWork { tx }))
+    }
+
+    async fn begin_read(&self) -> Result<Box<dyn UnitOfWork>, RepositoryError> {
+        let tx = self.pool.begin().await.map_err(sqlite_error)?;
         Ok(Box::new(SqliteUnitOfWork { tx }))
     }
 }
@@ -69,10 +96,10 @@ impl UnitOfWork for SqliteUnitOfWork {
     }
 
     async fn commit(self: Box<Self>) -> Result<(), RepositoryError> {
-        self.tx.commit().await.map_err(storage)
+        self.tx.commit().await.map_err(sqlite_error)
     }
 
     async fn rollback(self: Box<Self>) -> Result<(), RepositoryError> {
-        self.tx.rollback().await.map_err(storage)
+        self.tx.rollback().await.map_err(sqlite_error)
     }
 }
