@@ -1,4 +1,4 @@
-use domain::{RepositoryError, StoredTodo, Title, Todo, TodoRepository};
+use domain::todo::{RepositoryError, StoredTodo, Title, Todo, TodoRepository};
 use infrastructure::SqliteTodoRepository;
 
 #[tokio::test]

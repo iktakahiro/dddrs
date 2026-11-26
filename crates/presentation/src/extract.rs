@@ -4,7 +4,7 @@ use axum::{
     extract::{FromRequest, FromRequestParts, Path, Request},
     http::{StatusCode, request::Parts},
 };
-use domain::{Description, Title, TodoId};
+use domain::todo::{Description, Title, TodoId};
 use serde::Deserialize;
 
 pub(crate) struct TodoPath(pub TodoId);

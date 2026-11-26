@@ -1,6 +1,6 @@
 use crate::storage;
-use domain::{
-    Completed, Description, Details, InProgress, NotStarted, RepositoryError, Snapshot, StoredTodo,
+use domain::todo::{
+    self, Completed, Description, InProgress, NotStarted, RepositoryError, Snapshot, StoredTodo,
     Title, Todo,
 };
 
@@ -20,7 +20,7 @@ impl TryFrom<TodoRow> for Snapshot {
     type Error = RepositoryError;
 
     fn try_from(row: TodoRow) -> Result<Self, Self::Error> {
-        let details = Details {
+        let details = todo::Details {
             id: row.id.parse().map_err(storage)?,
             title: Title::try_from(row.title).map_err(storage)?,
             description: row

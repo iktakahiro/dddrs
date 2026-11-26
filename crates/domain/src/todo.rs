@@ -1,7 +1,15 @@
-use crate::{Description, Title, TodoId};
+//! Types and operations for the Todo lifecycle.
+
+mod repository;
+mod values;
+
+pub use repository::{RepositoryError, Snapshot, TodoRepository};
+pub use values::{Description, Title, TodoId, ValidationError};
+
 use chrono::Utc;
 use thiserror::Error;
 
+/// The fields shared by all lifecycle states of a Todo.
 #[derive(Debug)]
 pub struct Details {
     pub id: TodoId,
@@ -50,7 +58,7 @@ impl Todo<NotStarted> {
     /// Consume the pending Todo so the same value cannot be started twice.
     ///
     /// ```compile_fail,E0382
-    /// use domain::{Title, Todo};
+    /// use domain::todo::{Title, Todo};
     /// let todo = Todo::new(Title::try_from(String::from("Buy groceries")).unwrap(), None);
     /// let started = todo.start();
     /// todo.start();
@@ -65,7 +73,7 @@ impl Todo<InProgress> {
     /// Complete an in-progress Todo. A pending Todo has no such method.
     ///
     /// ```compile_fail,E0599
-    /// use domain::{Title, Todo};
+    /// use domain::todo::{Title, Todo};
     /// let todo = Todo::new(Title::try_from(String::from("Buy groceries")).unwrap(), None);
     /// todo.complete();
     /// ```

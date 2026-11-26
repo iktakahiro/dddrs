@@ -1,4 +1,4 @@
-use domain::{
+use domain::todo::{
     Description, RepositoryError, Snapshot, StoredTodo, Title, Todo, TodoId, TodoRepository,
     TransitionError,
 };

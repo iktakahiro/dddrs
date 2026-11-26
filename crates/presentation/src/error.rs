@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use domain::{RepositoryError, ValidationError};
+use domain::todo::{RepositoryError, ValidationError};
 use serde::Serialize;
 
 pub(crate) struct ApiError(pub StatusCode, pub String);

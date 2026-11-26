@@ -31,7 +31,7 @@ curl -fsS "$base/$id"
 たとえば `PATCH /todos/{id}/start` は次の順に進む。**実行時の呼び出し順と、クレートの依存方向は異なる。**
 
 1. [presentation](crates/presentation/src/lib.rs) が HTTP を受け、[extractor](crates/presentation/src/extract.rs) がパスを `TodoId` に変換する。
-2. [application](crates/application/src/lib.rs) の `TodoService::start` が [リポジトリの trait](crates/domain/src/repository.rs) 経由で Todo を読み、[domain](crates/domain/src/todo.rs) に状態遷移を依頼する。
+2. [application](crates/application/src/lib.rs) の `TodoService::start` が [リポジトリの trait](crates/domain/src/todo/repository.rs) 経由で Todo を読み、[domain](crates/domain/src/todo.rs) に状態遷移を依頼する。
 3. [infrastructure](crates/infrastructure/src/lib.rs) が同じ trait の実装として、sqlx で変更を保存する。読み出し時の版番号を更新条件に含めるので、後から来た古い更新が完了状態を巻き戻すことはない。
 4. presentation が結果を JSON に変換する。どの実装を使うかは、起動時に [server](crates/server/src/main.rs) が一度だけ決める。
 
@@ -45,10 +45,12 @@ curl -fsS "$base/$id"
 
 クレートは Go のパッケージのように `use` で参照するが、別クレートを使うには自身の `Cargo.toml` に依存宣言が必要。たとえば application から `infrastructure::SqliteTodoRepository` を参照してもコンパイルできない。マニフェストに依存を書き足して境界を緩めた場合も、[依存方向のテスト](crates/server/tests/layers.rs) が検出する。
 
+ドメインの公開型はクレート直下に並べず、エンティティごとのモジュールに置く。たとえば `domain::todo::Details` と `domain::todo::Title` は Todo の型なので、別のエンティティでも自身のモジュール内で同じ短い名前を使える。
+
 ## Rust が何を保証するか
 
 ```rust
-use domain::{Title, Todo};
+use domain::todo::{Title, Todo};
 
 let title = Title::try_from(String::from("夕飯の買い物")).unwrap();
 let pending = Todo::new(title, None);   // Todo<NotStarted>
@@ -60,7 +62,7 @@ let done = active.complete();          // Todo<Completed> に完了時刻が入�
 
 | dddpy の表現 | dddrs の表現とその理由 |
 | --- | --- |
-| 値オブジェクトは frozen dataclass | [Title・Description・TodoId](crates/domain/src/values.rs) は非公開フィールドを持つ newtype。TypeScript の型エイリアスとは違い、文字列や別の値オブジェクトをそのまま渡せない。長さや UUID の形式は入力時に検証する。 |
+| 値オブジェクトは frozen dataclass | [Title・Description・TodoId](crates/domain/src/todo/values.rs) は非公開フィールドを持つ newtype。TypeScript の型エイリアスとは違い、文字列や別の値オブジェクトをそのまま渡せない。長さや UUID の形式は入力時に検証する。 |
 | エンティティのメソッドが状態を書き換える | 内容の編集は `&mut self`（排他的な借用）。状態の型が変わる遷移は `self` を消費して新しい型を返す。上のコメントアウトした誤用は `compile_fail` テストで確認できる。 |
 | DB の値を読み、状態を条件分岐で検査 | DB の行や HTTP 入力までコンパイラが保証するわけではない。[行からの復元](crates/infrastructure/src/row.rs)で3状態を表す enum `StoredTodo` を作り、`match` で分岐してから型付きの遷移に委譲する。 |
 | Protocol でリポジトリを差し替える | trait は Go の interface に近いが、実装側で `impl TodoRepository for ...` を宣言する。`Arc<dyn TodoRepository>` は複数リクエストで共有できる trait オブジェクト。`async_trait` により非同期メソッドもこの境界から呼べる。 |

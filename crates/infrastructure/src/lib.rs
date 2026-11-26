@@ -1,7 +1,7 @@
 mod row;
 
 use async_trait::async_trait;
-use domain::{Description, RepositoryError, Snapshot, StoredTodo, TodoId, TodoRepository};
+use domain::todo::{Description, RepositoryError, Snapshot, StoredTodo, TodoId, TodoRepository};
 use row::TodoRow;
 use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
 use std::error::Error;

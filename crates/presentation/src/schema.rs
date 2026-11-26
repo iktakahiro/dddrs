@@ -1,4 +1,4 @@
-use domain::{Description, StoredTodo};
+use domain::todo::{Description, StoredTodo};
 use serde::Serialize;
 
 #[derive(Serialize)]
