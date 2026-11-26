@@ -111,7 +111,7 @@ crates/
 │   └── src/
 │       ├── error.rs              # エンティティ横断の RepositoryError
 │       └── todo/
-│           ├── entity.rs         # Todo 集約、TodoState ADT、TodoStatus、TransitionError
+│           ├── entity.rs         # Todo 集約、TodoState ADT、TransitionError
 │           ├── values.rs         # TodoId、Title、Description、ValidationError
 │           └── repository.rs     # TodoRepository trait と Snapshot
 ├── application/                  # 単一責任のユースケース & トランザクションポート
@@ -199,7 +199,7 @@ crates/
 - Rust の**代数的データ型（データを持つ enum）**を使い、不正な状態をコンパイル時に表現不可能にする。
 - プリミティブ型の取り違えを防ぐため、生成時検証を備えた newtype として**値オブジェクト**を定義する（`TryFrom` / `FromStr` / `from_optional`）。
 - 永続化の抽象ポート（**リポジトリ trait**）と、ドメイン固有のエラー型（`TransitionError`, `ValidationError`, `RepositoryError`）を定義する。
-- 日時や状態はシリアライズ表現ではなくドメインの型（`DateTime<Utc>`, `TodoStatus`）で保持する。
+- 日時や状態はシリアライズ表現ではなくドメインの型（`DateTime<Utc>`, `TodoState`）で保持する。
 
 #### このレイヤーがすべきでないこと
 - `axum`・`sqlx`・`serde` を導入しない（エンティティに `#[derive(Serialize)]` や `#[derive(sqlx::FromRow)]` を付けない）。
@@ -214,14 +214,6 @@ crates/
 `completed_at` を `TodoState::Completed` バリアントにのみ持たせることで、「未完了なのに完了時刻がある」「完了済みなのに完了時刻がない」という不正な状態を型レベルで排除しています。また、`PartialEq` は DDD のエンティティ同一性に従い `id` のみで比較します。
 
 ```rust
-/// Coarse lifecycle status of a Todo.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TodoStatus {
-    NotStarted,
-    InProgress,
-    Completed,
-}
-
 /// Lifecycle state of a Todo.
 ///
 /// Storing `completed_at` inside the `Completed` variant makes illegal states
@@ -359,7 +351,7 @@ pub trait TodoRepository: Send {
 - 実 DB を使わないインメモリ `UnitOfWorkFactory` でユースケース単体テストを提供する。
 
 #### このレイヤーがすべきでないこと
-- エンティティの業務ルールを重複実装しない（例：ユースケース内で `todo.status() == TodoStatus::NotStarted` を判定するのではなく、`todo.complete()` へ委譲する）。
+- エンティティの業務ルールを重複実装しない（例：ユースケース内で `todo.state() == TodoState::NotStarted` を判定するのではなく、`todo.complete()` へ委譲する）。
 - `infrastructure`・`presentation`・`sqlx`・`axum` に依存しない。
 - 全 CRUD 操作を 1 つの巨大な `TodoService` に詰め込まない（複数エンティティに跨る操作が出た瞬間に肥大化・責務曖昧化するため）。
 - HTTP ステータスコードや JSON レスポンス型を返さない。
@@ -508,7 +500,7 @@ impl From<RepositoryError> for UseCaseError {
 #### このレイヤーがすべきこと
 - `UnitOfWorkFactory`・`UnitOfWork`・リポジトリ trait（`TodoRepository`）を実装する。
 - DB 接続設定（`foreign_keys`・WAL モード・`busy_timeout`・マイグレーション適用）を管理する。
-- DB の行データ（`TodoRow`・ステータス文字列・ミリ秒整数）とドメインモデル（`Todo::reconstitute`・`TodoStatus`・`DateTime<Utc>`）を相互変換する。
+- DB の行データ（`TodoRow`・ステータス文字列・ミリ秒整数）とドメインモデル（`Todo::reconstitute`・`TodoState`・`DateTime<Utc>`）を相互変換する。
 - 永続化固有の堅牢性（`SELECT *` を避けた明示カラム列挙、`LIMIT ?` のパラメータ化、`WHERE id = ? AND version = ?` による楽観ロック）を担保する。
 - `sqlx::Error` を境界で `RepositoryError` へ変換し、内部実装を隠蔽する。
 
@@ -571,17 +563,17 @@ impl UnitOfWork for SqliteUnitOfWork {
 
 **トランザクションに紐づくリポジトリと楽観ロック（[`crates/infrastructure/src/todo/repository.rs`](crates/infrastructure/src/todo/repository.rs)）:**
 
-`TodoStatus` から DB カラム文字列へのマッピングをインフラ層に閉じているため、DB 表現を変更してもドメイン層へ波及しません。
+`TodoState` から DB カラム文字列へのマッピングをインフラ層に閉じているため、DB 表現を変更してもドメイン層へ波及しません。
 
 ```rust
 const SELECT_COLUMNS: &str =
     "id, title, description, status, created_at, updated_at, completed_at, version";
 
-fn status_column(status: TodoStatus) -> &'static str {
-    match status {
-        TodoStatus::NotStarted => "not_started",
-        TodoStatus::InProgress => "in_progress",
-        TodoStatus::Completed => "completed",
+fn status_column(state: TodoState) -> &'static str {
+    match state {
+        TodoState::NotStarted => "not_started",
+        TodoState::InProgress => "in_progress",
+        TodoState::Completed { .. } => "completed",
     }
 }
 
@@ -607,7 +599,7 @@ impl TodoRepository for SqliteTodoRepository<'_> {
         )
         .bind(todo.title().as_str())
         .bind(todo.description().map(Description::as_str))
-        .bind(status_column(todo.status()))
+        .bind(status_column(todo.state()))
         .bind(todo.updated_at().timestamp_millis())
         .bind(todo.completed_at().map(|at| at.timestamp_millis()))
         .bind(todo.id().to_string())
@@ -760,11 +752,11 @@ async fn start(
 
 ```rust
 // crates/presentation/src/todo/schema.rs
-fn status_str(status: TodoStatus) -> &'static str {
-    match status {
-        TodoStatus::NotStarted => "not_started",
-        TodoStatus::InProgress => "in_progress",
-        TodoStatus::Completed => "completed",
+fn status_str(state: TodoState) -> &'static str {
+    match state {
+        TodoState::NotStarted => "not_started",
+        TodoState::InProgress => "in_progress",
+        TodoState::Completed { .. } => "completed",
     }
 }
 
@@ -778,7 +770,7 @@ impl From<Todo> for TodoResponse {
                 .map(Description::as_str)
                 .unwrap_or_default()
                 .into(),
-            status: status_str(todo.status()),
+            status: status_str(todo.state()),
             created_at: todo.created_at().timestamp_millis(),
             updated_at: todo.updated_at().timestamp_millis(),
             completed_at: todo.completed_at().map(|at| at.timestamp_millis()),

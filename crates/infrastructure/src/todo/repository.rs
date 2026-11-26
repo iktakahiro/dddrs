@@ -3,18 +3,18 @@ use crate::sqlite::storage;
 use async_trait::async_trait;
 use domain::{
     error::RepositoryError,
-    todo::{Description, Snapshot, Todo, TodoId, TodoRepository, TodoStatus},
+    todo::{Description, Snapshot, Todo, TodoId, TodoRepository, TodoState},
 };
 use sqlx::{Sqlite, Transaction};
 
 const SELECT_COLUMNS: &str =
     "id, title, description, status, created_at, updated_at, completed_at, version";
 
-fn status_column(status: TodoStatus) -> &'static str {
-    match status {
-        TodoStatus::NotStarted => "not_started",
-        TodoStatus::InProgress => "in_progress",
-        TodoStatus::Completed => "completed",
+fn status_column(state: TodoState) -> &'static str {
+    match state {
+        TodoState::NotStarted => "not_started",
+        TodoState::InProgress => "in_progress",
+        TodoState::Completed { .. } => "completed",
     }
 }
 
@@ -37,7 +37,7 @@ impl TodoRepository for SqliteTodoRepository<'_> {
         .bind(todo.id().to_string())
         .bind(todo.title().as_str())
         .bind(todo.description().map(Description::as_str))
-        .bind(status_column(todo.status()))
+        .bind(status_column(todo.state()))
         .bind(todo.created_at().timestamp_millis())
         .bind(todo.updated_at().timestamp_millis())
         .bind(todo.completed_at().map(|at| at.timestamp_millis()))
@@ -78,7 +78,7 @@ impl TodoRepository for SqliteTodoRepository<'_> {
         )
         .bind(todo.title().as_str())
         .bind(todo.description().map(Description::as_str))
-        .bind(status_column(todo.status()))
+        .bind(status_column(todo.state()))
         .bind(todo.updated_at().timestamp_millis())
         .bind(todo.completed_at().map(|at| at.timestamp_millis()))
         .bind(todo.id().to_string())

@@ -60,7 +60,7 @@ mod tests {
     use async_trait::async_trait;
     use domain::{
         error::RepositoryError,
-        todo::{Description, Snapshot, Title, Todo, TodoId, TodoRepository, TodoStatus},
+        todo::{Description, Snapshot, Title, Todo, TodoId, TodoRepository, TodoState},
     };
     use std::{
         collections::HashMap,
@@ -216,7 +216,7 @@ mod tests {
         let delete = DeleteTodoUseCaseImpl::new(Arc::clone(&uow));
 
         let created = create.execute(title("Write docs"), None).await.unwrap();
-        assert_eq!(created.status(), TodoStatus::NotStarted);
+        assert_eq!(created.state(), TodoState::NotStarted);
 
         // Premature completion rolls back without mutating stored state.
         let err = complete.execute(created.id()).await.unwrap_err();
@@ -225,7 +225,7 @@ mod tests {
             UseCaseError::Transition(TransitionError::NotStarted)
         ));
         let loaded = find_by_id.execute(created.id()).await.unwrap();
-        assert_eq!(loaded.status(), TodoStatus::NotStarted);
+        assert_eq!(loaded.state(), TodoState::NotStarted);
 
         // Update, start, and complete commit cleanly.
         let desc = Description::try_from("Include diagrams".to_owned()).unwrap();
@@ -237,19 +237,19 @@ mod tests {
         assert_eq!(edited.description(), Some(&desc));
 
         let started = start.execute(created.id()).await.unwrap();
-        assert_eq!(started.status(), TodoStatus::InProgress);
+        assert_eq!(started.state(), TodoState::InProgress);
 
         // Optimistic lock conflict rolls back and surfaces UseCaseError::Conflict.
         factory.fail_next_update_with_conflict();
         let conflict = complete.execute(created.id()).await.unwrap_err();
         assert!(matches!(conflict, UseCaseError::Conflict));
         assert_eq!(
-            find_by_id.execute(created.id()).await.unwrap().status(),
-            TodoStatus::InProgress
+            find_by_id.execute(created.id()).await.unwrap().state(),
+            TodoState::InProgress
         );
 
         let completed = complete.execute(created.id()).await.unwrap();
-        assert_eq!(completed.status(), TodoStatus::Completed);
+        assert!(matches!(completed.state(), TodoState::Completed { .. }));
         assert!(completed.completed_at().is_some());
 
         let listed = find_todos.execute().await.unwrap();
