@@ -1,11 +1,11 @@
-use domain::todo::{Description, Todo, TodoStatus};
+use domain::todo::{Description, Todo, TodoState};
 use serde::Serialize;
 
-fn status_str(status: TodoStatus) -> &'static str {
-    match status {
-        TodoStatus::NotStarted => "not_started",
-        TodoStatus::InProgress => "in_progress",
-        TodoStatus::Completed => "completed",
+fn status_str(state: TodoState) -> &'static str {
+    match state {
+        TodoState::NotStarted => "not_started",
+        TodoState::InProgress => "in_progress",
+        TodoState::Completed { .. } => "completed",
     }
 }
 
@@ -30,7 +30,7 @@ impl From<Todo> for TodoResponse {
                 .map(Description::as_str)
                 .unwrap_or_default()
                 .into(),
-            status: status_str(todo.status()),
+            status: status_str(todo.state()),
             created_at: todo.created_at().timestamp_millis(),
             updated_at: todo.updated_at().timestamp_millis(),
             completed_at: todo.completed_at().map(|at| at.timestamp_millis()),

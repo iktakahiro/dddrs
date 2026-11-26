@@ -2,14 +2,6 @@ use super::values::{Description, Title, TodoId};
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 
-/// Coarse lifecycle status of a Todo.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TodoStatus {
-    NotStarted,
-    InProgress,
-    Completed,
-}
-
 /// Lifecycle state of a Todo.
 ///
 /// Storing `completed_at` inside the `Completed` variant makes illegal states
@@ -23,14 +15,6 @@ pub enum TodoState {
 }
 
 impl TodoState {
-    pub fn status(&self) -> TodoStatus {
-        match self {
-            Self::NotStarted => TodoStatus::NotStarted,
-            Self::InProgress => TodoStatus::InProgress,
-            Self::Completed { .. } => TodoStatus::Completed,
-        }
-    }
-
     pub fn completed_at(&self) -> Option<DateTime<Utc>> {
         match self {
             Self::Completed { completed_at } => Some(*completed_at),
@@ -115,10 +99,6 @@ impl Todo {
 
     pub fn state(&self) -> TodoState {
         self.state
-    }
-
-    pub fn status(&self) -> TodoStatus {
-        self.state.status()
     }
 
     pub fn created_at(&self) -> DateTime<Utc> {
@@ -210,18 +190,23 @@ mod tests {
     #[test]
     fn valid_lifecycle_transitions_update_state_and_timestamps() {
         let mut todo = Todo::new_at(title("Buy groceries"), None, ts(1_000));
-        assert_eq!(todo.status(), TodoStatus::NotStarted);
+        assert_eq!(todo.state(), TodoState::NotStarted);
         assert_eq!(todo.created_at(), ts(1_000));
         assert_eq!(todo.updated_at(), ts(1_000));
         assert_eq!(todo.completed_at(), None);
 
         todo.start_at(ts(2_000)).unwrap();
-        assert_eq!(todo.status(), TodoStatus::InProgress);
+        assert_eq!(todo.state(), TodoState::InProgress);
         assert_eq!(todo.updated_at(), ts(2_000));
         assert_eq!(todo.completed_at(), None);
 
         todo.complete_at(ts(3_000)).unwrap();
-        assert_eq!(todo.status(), TodoStatus::Completed);
+        assert_eq!(
+            todo.state(),
+            TodoState::Completed {
+                completed_at: ts(3_000),
+            }
+        );
         assert_eq!(todo.updated_at(), ts(3_000));
         assert_eq!(todo.completed_at(), Some(ts(3_000)));
         assert_eq!(todo.created_at(), ts(1_000));
@@ -235,7 +220,7 @@ mod tests {
             todo.complete_at(ts(2_000)),
             Err(TransitionError::NotStarted)
         );
-        assert_eq!(todo.status(), TodoStatus::NotStarted);
+        assert_eq!(todo.state(), TodoState::NotStarted);
         assert_eq!(todo.updated_at(), ts(1_000));
 
         todo.start_at(ts(2_000)).unwrap();

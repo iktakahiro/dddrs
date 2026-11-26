@@ -111,7 +111,7 @@ crates/
 │   └── src/
 │       ├── error.rs              # Shared RepositoryError
 │       └── todo/
-│           ├── entity.rs         # Todo aggregate, TodoState ADT, TodoStatus, TransitionError
+│           ├── entity.rs         # Todo aggregate, TodoState ADT, TransitionError
 │           ├── values.rs         # TodoId, Title, Description, ValidationError
 │           └── repository.rs     # TodoRepository trait and Snapshot
 ├── application/                  # Single-responsibility use cases & transaction ports
@@ -199,7 +199,7 @@ The center of the onion. It expresses the business model and rules using pure Ru
 - Use Rust's **Algebraic Data Types (enums with data)** to make illegal states unrepresentable.
 - Define **value objects** as validated newtypes (`TryFrom` / `FromStr` / `from_optional`) so primitive types cannot be confused.
 - Define **repository traits (ports)** and shared domain/persistence error enums (`TransitionError`, `ValidationError`, `RepositoryError`).
-- Represent domain concepts with proper types (`DateTime<Utc>`, `TodoStatus`), not wire-format primitives.
+- Represent domain concepts with proper types (`DateTime<Utc>`, `TodoState`), not wire-format primitives.
 
 #### What this layer SHOULD NOT do
 - **Do not** import `axum`, `sqlx`, or `serde` (no `#[derive(Serialize, Deserialize)]` or `#[derive(sqlx::FromRow)]` on domain entities).
@@ -214,14 +214,6 @@ The center of the onion. It expresses the business model and rules using pure Ru
 Making `completed_at` part of `TodoState::Completed` ensures at compile time that an incomplete Todo can never hold a completion timestamp and a completed Todo always has one. `PartialEq` compares only `id`, following DDD entity identity semantics.
 
 ```rust
-/// Coarse lifecycle status of a Todo.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TodoStatus {
-    NotStarted,
-    InProgress,
-    Completed,
-}
-
 /// Lifecycle state of a Todo.
 ///
 /// Storing `completed_at` inside the `Completed` variant makes illegal states
@@ -359,7 +351,7 @@ Coordinates domain objects and persistence ports to fulfill concrete user-facing
 - Provide fast unit tests using an in-memory `UnitOfWorkFactory` without touching a real database.
 
 #### What this layer SHOULD NOT do
-- **Do not** re-implement business rules (e.g., checking `todo.status() == TodoStatus::NotStarted` inside a use case instead of calling `todo.complete()`).
+- **Do not** re-implement business rules (e.g., checking `todo.state() == TodoState::NotStarted` inside a use case instead of calling `todo.complete()`).
 - **Do not** depend on `infrastructure`, `presentation`, `sqlx`, or `axum`.
 - **Do not** aggregate unrelated CRUD operations into a single monolithic `TodoService` struct (which breaks down as soon as use cases span multiple entities).
 - **Do not** return HTTP status codes or JSON DTOs.
@@ -508,7 +500,7 @@ Adapts external technologies (here, SQLite via SQLx) to the traits defined in `d
 #### What this layer SHOULD do
 - Implement `UnitOfWorkFactory`, `UnitOfWork`, and repository traits (`TodoRepository`).
 - Own database connection configuration (`foreign_keys`, WAL mode, `busy_timeout`, SQL migrations).
-- Translate between database rows (`TodoRow`, SQL strings, millisecond integers) and domain objects (`Todo::reconstitute`, `TodoStatus`, `DateTime<Utc>`).
+- Translate between database rows (`TodoRow`, SQL strings, millisecond integers) and domain objects (`Todo::reconstitute`, `TodoState`, `DateTime<Utc>`).
 - Enforce persistence-level safeguards: explicit SQL column lists (avoiding `SELECT *`), parameterized `LIMIT ?`, and optimistic-locking `WHERE id = ? AND version = ?` checks.
 - Convert `sqlx::Error` into `RepositoryError` at the boundary.
 
@@ -577,11 +569,11 @@ Status-to-column mapping lives here rather than in `domain`, so changing databas
 const SELECT_COLUMNS: &str =
     "id, title, description, status, created_at, updated_at, completed_at, version";
 
-fn status_column(status: TodoStatus) -> &'static str {
-    match status {
-        TodoStatus::NotStarted => "not_started",
-        TodoStatus::InProgress => "in_progress",
-        TodoStatus::Completed => "completed",
+fn status_column(state: TodoState) -> &'static str {
+    match state {
+        TodoState::NotStarted => "not_started",
+        TodoState::InProgress => "in_progress",
+        TodoState::Completed { .. } => "completed",
     }
 }
 
@@ -607,7 +599,7 @@ impl TodoRepository for SqliteTodoRepository<'_> {
         )
         .bind(todo.title().as_str())
         .bind(todo.description().map(Description::as_str))
-        .bind(status_column(todo.status()))
+        .bind(status_column(todo.state()))
         .bind(todo.updated_at().timestamp_millis())
         .bind(todo.completed_at().map(|at| at.timestamp_millis()))
         .bind(todo.id().to_string())
@@ -760,11 +752,11 @@ async fn start(
 
 ```rust
 // crates/presentation/src/todo/schema.rs
-fn status_str(status: TodoStatus) -> &'static str {
-    match status {
-        TodoStatus::NotStarted => "not_started",
-        TodoStatus::InProgress => "in_progress",
-        TodoStatus::Completed => "completed",
+fn status_str(state: TodoState) -> &'static str {
+    match state {
+        TodoState::NotStarted => "not_started",
+        TodoState::InProgress => "in_progress",
+        TodoState::Completed { .. } => "completed",
     }
 }
 
@@ -778,7 +770,7 @@ impl From<Todo> for TodoResponse {
                 .map(Description::as_str)
                 .unwrap_or_default()
                 .into(),
-            status: status_str(todo.status()),
+            status: status_str(todo.state()),
             created_at: todo.created_at().timestamp_millis(),
             updated_at: todo.updated_at().timestamp_millis(),
             completed_at: todo.completed_at().map(|at| at.timestamp_millis()),

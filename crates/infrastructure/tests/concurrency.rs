@@ -1,7 +1,7 @@
 use application::uow::UnitOfWorkFactory;
 use domain::{
     error::RepositoryError,
-    todo::{Title, Todo, TodoStatus},
+    todo::{Title, Todo, TodoState},
 };
 use infrastructure::sqlite::{self, SqliteUnitOfWorkFactory};
 
@@ -59,7 +59,7 @@ async fn a_stale_write_cannot_undo_a_transition_or_resurrect_a_deleted_todo() {
         uow.rollback().await.unwrap();
         snapshot
     };
-    assert_eq!(latest.todo.status(), TodoStatus::InProgress);
+    assert_eq!(latest.todo.state(), TodoState::InProgress);
 
     // Delete the Todo and ensure a stale update cannot resurrect it.
     {
@@ -125,7 +125,7 @@ async fn rolled_back_and_uncommitted_transactions_discard_all_writes() {
     {
         let mut uow = factory.begin().await.unwrap();
         let reloaded = uow.todos().find_by_id(first.id()).await.unwrap().unwrap();
-        assert_eq!(reloaded.todo.status(), TodoStatus::NotStarted);
+        assert_eq!(reloaded.todo.state(), TodoState::NotStarted);
         assert_eq!(reloaded.version, 0);
         assert_eq!(uow.todos().find_latest(20).await.unwrap().len(), 2);
         uow.rollback().await.unwrap();
