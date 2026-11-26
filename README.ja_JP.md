@@ -4,7 +4,7 @@
 
 [English](README.md) | 日本語
 
-[axum](https://github.com/tokio-rs/axum) と [SQLx](https://github.com/launchbadge/sqlx)（SQLite）を用いた、**Rust によるドメイン駆動設計（DDD）およびオニオンアーキテクチャ**の実装サンプルです。
+[axum](https://github.com/tokio-rs/axum) と [SQLx](https://github.com/launchbadge/sqlx)（SQLite）を用いた、**Rust によるドメイン駆動設計（DDD）およびオニオンアーキテクチャ**の実装サンプル兼・各レイヤー設計ガイドです。
 
 姉妹リポジトリ:
 - Python 版: [dddpy](https://github.com/iktakahiro/dddpy)
@@ -19,6 +19,7 @@
 - **データベース:** [SQLx](https://github.com/launchbadge/sqlx) 0.8 + SQLite（同梱ビルド・マイグレーション付き）
 - **エラーハンドリング:** [thiserror](https://github.com/dtolnay/thiserror)
 - **日時・ID:** [chrono](https://github.com/chronotope/chrono), [uuid](https://github.com/uuid-rs/uuid)
+- **E2E テスト（任意）:** [Hurl](https://hurl.dev/)
 
 ## クイックスタート
 
@@ -80,7 +81,7 @@ curl -fsS -i -X DELETE "$BASE_URL/todos/$TODO_ID"
 }
 ```
 
-## アーキテクチャ
+## アーキテクチャ概要
 
 Cargo ワークスペースで各層を独立したクレートに分割し、**オニオンアーキテクチャの依存方向をコンパイル時に強制**しています。
 
@@ -140,13 +141,15 @@ crates/
 │           ├── extract.rs        # TodoPath / TodoInput Extractor
 │           ├── schema.rs         # TodoResponse シリアライズ
 │           └── error.rs          # UseCaseError / ValidationError → HTTP ステータス変換
-└── server/                       # Composition Root、バイナリ起動、統合テスト・依存方向テスト
+└── server/                       # Composition Root、バイナリ起動、統合テスト・E2E テスト
     ├── src/
     │   ├── lib.rs                # build_router() / build_sqlite_app()
     │   └── main.rs
     └── tests/
         ├── http.rs               # インプロセス HTTP 統合テスト
-        └── layers.rs             # cargo metadata による依存方向検証テスト
+        ├── layers.rs             # cargo metadata による依存方向検証テスト
+        ├── e2e.rs                # 実サーバー起動 Hurl ランナー
+        └── e2e/todos.hurl        # HTTP E2E シナリオ
 ```
 
 ### クレート間の依存ルール
@@ -159,7 +162,7 @@ crates/
 | `presentation` | `application`、`domain` |
 | `server` | `presentation`、`application`、`infrastructure` |
 
-別クレートを参照するには自身の `Cargo.toml` に依存宣言が必要なため、たとえば `application` や `domain` から `infrastructure` を参照しようとしてもコンパイルエラーになります。さらに、[`crates/server/tests/layers.rs`](crates/server/tests/layers.rs) が CI 上で `cargo metadata` を検査し、`Cargo.toml` への依存追加による境界違反も防いでいます。
+別クレートを参照するには自身の `Cargo.toml` に依存宣言が必要なため、たとえば `application` や `domain` から `infrastructure` を参照しようとしてもコンパイルエラーになります。さらに、[`crates/server/tests/layers.rs`](crates/server/tests/layers.rs) が CI 上で `cargo metadata` を検査し、`Cargo.toml` への依存追加による境界違反や、`axum` / `sqlx` の内側クレートへの流出を防いでいます。
 
 ### リクエスト処理の流れ（`PATCH /todos/{id}/start`）
 
@@ -171,39 +174,683 @@ crates/
 4. **Infrastructure**（[`sqlite.rs`](crates/infrastructure/src/sqlite.rs), [`repository.rs`](crates/infrastructure/src/todo/repository.rs)）: 有効な SQLite トランザクション上で `WHERE id = ? AND version = ?` の楽観ロック付きクエリを実行します。
 5. **Server**（[`lib.rs`](crates/server/src/lib.rs)）: 起動時に一度だけ `SqliteUnitOfWorkFactory` を各ユースケースへ配線します。
 
-## 主な設計ポイント
+## レイヤー別設計ガイド（責務とコード実例）
 
-### 1. 代数的データ型（ADT）で不正な状態を表現不可能にする
+各レイヤーが**何をすべきで、何をすべきでないか**を整理し、リポジトリ内の実コードとともに解説します。
 
-[`crates/domain/src/todo/entity.rs`](crates/domain/src/todo/entity.rs) では、`Todo` の全フィールドを非公開にし、ライフサイクル状態を enum で表現しています。
+### 責務の早見表
+
+| レイヤー | すべきこと（Do） | すべきでないこと（Don't） |
+| --- | --- | --- |
+| **Domain**（`crates/domain`） | エンティティ・値オブジェクト・不変条件・ドメインエラー・リポジトリ trait の定義 | HTTP・JSON/`serde`・SQL/`sqlx`・トランザクション制御への依存 |
+| **Application**（`crates/application`） | 1 Struct 1 Method のユースケース編成、`UnitOfWork` によるトランザクション境界管理、永続化エラーの抽象化 | エンティティ固有ルールの重複実装、SQL 記述、HTTP ステータス返却、無関係な操作の 1 Service 集約 |
+| **Infrastructure**（`crates/infrastructure`） | `UnitOfWork`・リポジトリ trait の実装、DB 接続・マイグレーション管理、行データ ↔ ドメインモデルの相互変換 | 状態遷移などの業務判断、アプリ固有の上限値（`LIMIT 20` 等）の直書き、HTTP 処理、`sqlx` 型の外部流出 |
+| **Presentation**（`crates/presentation`） | HTTP ルーティング、入力の抽出・検証、ハンドラ単位での単一ユースケース呼び出し、レスポンス JSON 変換・HTTP エラー変換 | リポジトリ/DB の直接操作、トランザクション管理、業務ルール実装、`RepositoryError` の直接参照、具象 `*Impl` の生成 |
+| **Server**（`crates/server`） | 環境変数読み込み、具象実装の DI 配線、ルーター統合、サーバー起動 | ビジネスロジックの記述、SQL 実行（`sqlx` への直接依存）、HTTP ハンドラや DTO の定義 |
+
+---
+
+### 1. Domain 層（`crates/domain`）
+
+オニオンの中心です。Web フレームワークやデータベースを一切知らず、純粋な Rust の型でビジネスモデルと業務ルールを表現します。
+
+#### このレイヤーがすべきこと
+- 非公開フィールドと振る舞いメソッドで不変条件を守る**集約・エンティティ**を定義する。
+- Rust の**代数的データ型（データを持つ enum）**を使い、不正な状態をコンパイル時に表現不可能にする。
+- プリミティブ型の取り違えを防ぐため、生成時検証を備えた newtype として**値オブジェクト**を定義する（`TryFrom` / `FromStr` / `from_optional`）。
+- 永続化の抽象ポート（**リポジトリ trait**）と、ドメイン固有のエラー型（`TransitionError`, `ValidationError`, `RepositoryError`）を定義する。
+- 日時や状態はシリアライズ表現ではなくドメインの型（`DateTime<Utc>`, `TodoStatus`）で保持する。
+
+#### このレイヤーがすべきでないこと
+- `axum`・`sqlx`・`serde` を導入しない（エンティティに `#[derive(Serialize)]` や `#[derive(sqlx::FromRow)]` を付けない）。
+- DB カラム文字列や JSON 文字列（`"not_started"` 等）をエンティティのメソッドから返さない。
+- データベースのトランザクション開始・コミット・ロールバックを行わない。
+- 不変条件を迂回して書き換えられる `pub` フィールドを露出しない。
+
+#### コード実例
+
+**エンティティと ADT による状態表現（[`crates/domain/src/todo/entity.rs`](crates/domain/src/todo/entity.rs)）:**
+
+`completed_at` を `TodoState::Completed` バリアントにのみ持たせることで、「未完了なのに完了時刻がある」「完了済みなのに完了時刻がない」という不正な状態を型レベルで排除しています。また、`PartialEq` は DDD のエンティティ同一性に従い `id` のみで比較します。
 
 ```rust
+/// Coarse lifecycle status of a Todo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TodoStatus {
+    NotStarted,
+    InProgress,
+    Completed,
+}
+
+/// Lifecycle state of a Todo.
+///
+/// Storing `completed_at` inside the `Completed` variant makes illegal states
+/// unrepresentable: an incomplete Todo cannot carry a completion timestamp, and
+/// a completed Todo always carries one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TodoState {
     NotStarted,
     InProgress,
     Completed { completed_at: DateTime<Utc> },
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum TransitionError {
+    #[error("Todo has not been started")]
+    NotStarted,
+    #[error("Todo has already been started")]
+    AlreadyStarted,
+    #[error("Todo has already been completed")]
+    AlreadyCompleted,
+}
+
+#[derive(Debug, Clone)]
+pub struct Todo {
+    id: TodoId,
+    title: Title,
+    description: Option<Description>,
+    state: TodoState,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl Todo {
+    pub fn start_at(&mut self, now: DateTime<Utc>) -> Result<(), TransitionError> {
+        match self.state {
+            TodoState::NotStarted => {
+                self.state = TodoState::InProgress;
+                self.updated_at = now;
+                Ok(())
+            }
+            TodoState::InProgress => Err(TransitionError::AlreadyStarted),
+            TodoState::Completed { .. } => Err(TransitionError::AlreadyCompleted),
+        }
+    }
+
+    pub fn complete_at(&mut self, now: DateTime<Utc>) -> Result<(), TransitionError> {
+        match self.state {
+            TodoState::NotStarted => Err(TransitionError::NotStarted),
+            TodoState::InProgress => {
+                self.state = TodoState::Completed { completed_at: now };
+                self.updated_at = now;
+                Ok(())
+            }
+            TodoState::Completed { .. } => Err(TransitionError::AlreadyCompleted),
+        }
+    }
+}
+
+impl PartialEq for Todo {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
 ```
 
-`completed_at` を `Completed` バリアントにのみ持たせることで、「未完了なのに完了時刻が入っている」「完了済みなのに完了時刻がない」という不正な状態を**コンパイル時に表現不可能**にしています。単一の `Todo` 型で一貫して扱えるため、状態やエンティティが増えた際にも複雑化しにくい設計です。
+**値オブジェクト（[`crates/domain/src/todo/values.rs`](crates/domain/src/todo/values.rs)）:**
 
-### 2. Newtype による値オブジェクトとカプセル化
+文字数制限や空文字の正規化を HTTP ハンドラへ散らさず、値オブジェクトのコンストラクタに閉じ込めます。`Description::from_optional` で `Some("")` を `None` に正規化することで、「説明なし」の表現が一意になります。
 
-[`TodoId`・`Title`・`Description`](crates/domain/src/todo/values.rs) は非公開フィールドを持つ newtype とし、生成時（`TryFrom` / `FromStr` / `Description::from_optional`）に不変条件を検証します。型が分かれているため、`Title` と `Description` の取り違えをコンパイル時に防げます。ドメイン層の日時は `DateTime<Utc>` で保持し、Unix ミリ秒やステータス文字列への変換は `infrastructure` と `presentation` の責務に閉じています。
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Title(String);
 
-### 3. 1 ユースケース = 1 Struct・1 メソッドの原則
+impl TryFrom<String> for Title {
+    type Error = ValidationError;
 
-[`crates/application/src/todo/`](crates/application/src/todo) の各操作は、`dddpy`・`oniongo` と同様に独立した trait と構造体（単一の `execute` メソッド）として定義しています。
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
+        if raw.is_empty() || raw.chars().count() > 100 {
+            return Err(ValidationError::Title);
+        }
+        Ok(Self(raw))
+    }
+}
 
-- `presentation` の各ハンドラは axum の `FromRef` 経由で自分が呼ぶ 1 つのユースケース trait のみに依存するため、DB なしでハンドラ単位の単体テストが書けます。
-- 複数エンティティを跨ぐユースケースが増えても、必要な依存だけを注入でき、巨大なサービスクラス化を防げます。
-- 将来的に参照系の負荷分離（軽量 CQRS）が必要になった際も、`FindTodosUseCase` など参照側だけ専用 QueryService へ差し替えられます。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Description(String);
 
-### 4. Unit of Work によるトランザクション管理
+impl Description {
+    /// Normalize an optional raw description into a domain value.
+    ///
+    /// Both `None` and an empty string represent an absent description (`None`),
+    /// avoiding duplicate representations of emptiness.
+    pub fn from_optional(raw: Option<String>) -> Result<Option<Self>, ValidationError> {
+        match raw {
+            None => Ok(None),
+            Some(value) if value.is_empty() => Ok(None),
+            Some(value) => Self::try_from(value).map(Some),
+        }
+    }
+}
+```
 
-[`UnitOfWork` / `UnitOfWorkFactory`](crates/application/src/uow.rs) により、`sqlx` の型を内側へ漏らさずにアプリケーション層でトランザクション境界を制御しています。リポジトリの各メソッドが `&mut self` を取ることで、1 つの DB トランザクション上で同時に複数クエリを走らせない制約を Rust の借用チェッカーで自然に表現しています。複数エンティティを跨ぐ更新も同一トランザクションで原子的にコミット／ロールバックできます。
+**リポジトリポートと共通エラー（[`crates/domain/src/todo/repository.rs`](crates/domain/src/todo/repository.rs), [`crates/domain/src/error.rs`](crates/domain/src/error.rs)）:**
 
-### `dddpy` との設計比較
+依存性逆転の原則に従い trait は `domain` 側に置きます。各メソッドが `&mut self` を取ることで、インフラ側が余計なロックなしで有効な DB トランザクションを直接操作できます。`RepositoryError` は `domain::error` に配置し、複数エンティティで再利用できるようにしています。
+
+```rust
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    pub todo: Todo,
+    pub version: i64,
+}
+
+#[async_trait]
+pub trait TodoRepository: Send {
+    async fn insert(&mut self, todo: &Todo) -> Result<(), RepositoryError>;
+    async fn find_by_id(&mut self, id: TodoId) -> Result<Option<Snapshot>, RepositoryError>;
+    async fn find_latest(&mut self, limit: u32) -> Result<Vec<Todo>, RepositoryError>;
+    async fn update(&mut self, todo: &Todo, expected_version: i64) -> Result<(), RepositoryError>;
+    async fn delete(&mut self, id: TodoId) -> Result<bool, RepositoryError>;
+}
+```
+
+---
+
+### 2. Application 層（`crates/application`）
+
+ドメインオブジェクトと永続化ポートを協調させ、ユーザー起点の具体的な操作（ユースケース）を実行する層です。
+
+#### このレイヤーがすべきこと
+- **1 Struct = 1 `execute` メソッド**の原則に従い、ユースケースごとにファイル・trait ポート・実装 Struct を分割する。
+- `UnitOfWork` / `UnitOfWorkFactory` を通じて**トランザクション境界を管理**する（成功時に `commit`、失敗時に `rollback`）。
+- 一覧取得の上限件数（`DEFAULT_LIST_LIMIT = 20`）のようなアプリケーション固有のポリシーを保持する。
+- 低レベルの `RepositoryError` を `UseCaseError` へ変換し、Presentation 層を永続化の詳細から隔離する。
+- 実 DB を使わないインメモリ `UnitOfWorkFactory` でユースケース単体テストを提供する。
+
+#### このレイヤーがすべきでないこと
+- エンティティの業務ルールを重複実装しない（例：ユースケース内で `todo.status() == TodoStatus::NotStarted` を判定するのではなく、`todo.complete()` へ委譲する）。
+- `infrastructure`・`presentation`・`sqlx`・`axum` に依存しない。
+- 全 CRUD 操作を 1 つの巨大な `TodoService` に詰め込まない（複数エンティティに跨る操作が出た瞬間に肥大化・責務曖昧化するため）。
+- HTTP ステータスコードや JSON レスポンス型を返さない。
+
+#### コード実例
+
+**Unit of Work ポート（[`crates/application/src/uow.rs`](crates/application/src/uow.rs)）:**
+
+トランザクション制御はドメインではなくアプリケーション層の責務です。別のエンティティ（例：`Project`）を追加するときは、ここにリポジトリアクセサを 1 つ足すだけで複数集約を跨いだ原子的更新が可能になります。
+
+```rust
+#[async_trait]
+pub trait UnitOfWork: Send {
+    fn todos(&mut self) -> Box<dyn TodoRepository + '_>;
+
+    async fn commit(self: Box<Self>) -> Result<(), RepositoryError>;
+    async fn rollback(self: Box<Self>) -> Result<(), RepositoryError>;
+}
+
+#[async_trait]
+pub trait UnitOfWorkFactory: Send + Sync {
+    async fn begin(&self) -> Result<Box<dyn UnitOfWork>, RepositoryError>;
+}
+```
+
+**1 Struct 1 Method のユースケース（[`crates/application/src/todo/create_todo.rs`](crates/application/src/todo/create_todo.rs)）:**
+
+```rust
+#[async_trait]
+pub trait CreateTodoUseCase: Send + Sync {
+    async fn execute(
+        &self,
+        title: Title,
+        description: Option<Description>,
+    ) -> Result<Todo, UseCaseError>;
+}
+
+pub struct CreateTodoUseCaseImpl {
+    uow_factory: Arc<dyn UnitOfWorkFactory>,
+}
+
+impl CreateTodoUseCaseImpl {
+    pub fn new(uow_factory: Arc<dyn UnitOfWorkFactory>) -> Self {
+        Self { uow_factory }
+    }
+}
+
+#[async_trait]
+impl CreateTodoUseCase for CreateTodoUseCaseImpl {
+    async fn execute(
+        &self,
+        title: Title,
+        description: Option<Description>,
+    ) -> Result<Todo, UseCaseError> {
+        let mut uow = self.uow_factory.begin().await?;
+        let todo = Todo::new(title, description);
+        let inserted = uow.todos().insert(&todo).await;
+        if let Err(error) = inserted {
+            let _ = uow.rollback().await;
+            return Err(error.into());
+        }
+        uow.commit().await?;
+        Ok(todo)
+    }
+}
+```
+
+**共通トランザクションヘルパーと状態遷移ユースケース（[`crates/application/src/todo.rs`](crates/application/src/todo.rs), [`crates/application/src/todo/start_todo.rs`](crates/application/src/todo/start_todo.rs)）:**
+
+「読み込み → ドメイン操作 → 楽観ロック付き更新 → コミット／ロールバック」の定型処理は `application::todo` 内の非公開ヘルパーにまとめ、各ユースケース実装の見通しを保っています。
+
+```rust
+async fn update_in_tx(
+    uow_factory: &dyn UnitOfWorkFactory,
+    id: TodoId,
+    mutate: impl FnOnce(&mut Todo) -> Result<(), TransitionError>,
+) -> Result<Todo, UseCaseError> {
+    let mut uow = uow_factory.begin().await?;
+    let result: Result<Todo, UseCaseError> = async {
+        let snapshot = uow
+            .todos()
+            .find_by_id(id)
+            .await?
+            .ok_or(UseCaseError::NotFound)?;
+        let mut todo = snapshot.todo;
+        mutate(&mut todo)?;
+        uow.todos().update(&todo, snapshot.version).await?;
+        Ok(todo)
+    }
+    .await;
+
+    match result {
+        Ok(todo) => {
+            uow.commit().await?;
+            Ok(todo)
+        }
+        Err(error) => {
+            let _ = uow.rollback().await;
+            Err(error)
+        }
+    }
+}
+
+// crates/application/src/todo/start_todo.rs
+#[async_trait]
+impl StartTodoUseCase for StartTodoUseCaseImpl {
+    async fn execute(&self, id: TodoId) -> Result<Todo, UseCaseError> {
+        update_in_tx(self.uow_factory.as_ref(), id, Todo::start).await
+    }
+}
+```
+
+**エラーの抽象化（[`crates/application/src/todo/error.rs`](crates/application/src/todo/error.rs)）:**
+
+```rust
+#[derive(Debug, Error)]
+pub enum UseCaseError {
+    #[error("Todo not found")]
+    NotFound,
+    #[error(transparent)]
+    Transition(#[from] TransitionError),
+    #[error("Todo changed since it was read")]
+    Conflict,
+    #[error("Unexpected repository failure")]
+    Unexpected(#[source] Box<dyn Error + Send + Sync>),
+}
+
+impl From<RepositoryError> for UseCaseError {
+    fn from(error: RepositoryError) -> Self {
+        match error {
+            RepositoryError::Conflict => Self::Conflict,
+            RepositoryError::Storage(source) => Self::Unexpected(source),
+        }
+    }
+}
+```
+
+> **設計メモ — UseCase の trait 化と具象 Struct のみ構成のトレードオフ:** このサンプルでは `dddpy` / `oniongo` と足並みを揃え、Presentation 層の単体テストで単一ユースケースだけをスタブ差し替えできるよう `*UseCase` trait と `*UseCaseImpl` を対で定義しています。ボイラープレートを抑えたい実務案件では、1 Struct 1 Method の分割を維持したまま UseCase 側の trait を省き、`UnitOfWork` / リポジトリ境界だけを trait にする構成も有力な選択肢です。
+
+---
+
+### 3. Infrastructure 層（`crates/infrastructure`）
+
+`domain` と `application` で定義されたポート（trait）に対して、具体的な外部技術（本サンプルでは SQLx + SQLite）の実装を提供する層です。
+
+#### このレイヤーがすべきこと
+- `UnitOfWorkFactory`・`UnitOfWork`・リポジトリ trait（`TodoRepository`）を実装する。
+- DB 接続設定（`foreign_keys`・WAL モード・`busy_timeout`・マイグレーション適用）を管理する。
+- DB の行データ（`TodoRow`・ステータス文字列・ミリ秒整数）とドメインモデル（`Todo::reconstitute`・`TodoStatus`・`DateTime<Utc>`）を相互変換する。
+- 永続化固有の堅牢性（`SELECT *` を避けた明示カラム列挙、`LIMIT ?` のパラメータ化、`WHERE id = ? AND version = ?` による楽観ロック）を担保する。
+- `sqlx::Error` を境界で `RepositoryError` へ変換し、内部実装を隠蔽する。
+
+#### このレイヤーがすべきでないこと
+- 状態遷移の可否など、業務ルールの判断を行わない。
+- アプリケーション要件の上限件数（`LIMIT 20` 等）を SQL にハードコードせず、ユースケースから引数で受け取る。
+- `TodoRow` や `sqlx::Error`、生の `Transaction` を内側レイヤーや `presentation` へ露出しない。
+- `presentation` や `axum` に依存しない。
+
+#### コード実例
+
+**SQLite 接続設定と Unit of Work 実装（[`crates/infrastructure/src/sqlite.rs`](crates/infrastructure/src/sqlite.rs)）:**
+
+```rust
+pub async fn connect(url: &str) -> Result<SqlitePool, sqlx::Error> {
+    let options = url
+        .parse::<SqliteConnectOptions>()?
+        .create_if_missing(true)
+        .foreign_keys(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(Duration::from_secs(5));
+
+    // In-memory SQLite creates an isolated database per connection unless capped at 1.
+    let pool = if url == "sqlite::memory:" {
+        SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await?
+    } else {
+        SqlitePool::connect_with(options).await?
+    };
+
+    sqlx::migrate!().run(&pool).await?;
+    Ok(pool)
+}
+
+#[async_trait]
+impl UnitOfWorkFactory for SqliteUnitOfWorkFactory {
+    async fn begin(&self) -> Result<Box<dyn UnitOfWork>, RepositoryError> {
+        let tx = self.pool.begin().await.map_err(storage)?;
+        Ok(Box::new(SqliteUnitOfWork { tx }))
+    }
+}
+
+#[async_trait]
+impl UnitOfWork for SqliteUnitOfWork {
+    fn todos(&mut self) -> Box<dyn TodoRepository + '_> {
+        Box::new(SqliteTodoRepository::new(&mut self.tx))
+    }
+
+    async fn commit(self: Box<Self>) -> Result<(), RepositoryError> {
+        self.tx.commit().await.map_err(storage)
+    }
+
+    async fn rollback(self: Box<Self>) -> Result<(), RepositoryError> {
+        self.tx.rollback().await.map_err(storage)
+    }
+}
+```
+
+**トランザクションに紐づくリポジトリと楽観ロック（[`crates/infrastructure/src/todo/repository.rs`](crates/infrastructure/src/todo/repository.rs)）:**
+
+`TodoStatus` から DB カラム文字列へのマッピングをインフラ層に閉じているため、DB 表現を変更してもドメイン層へ波及しません。
+
+```rust
+const SELECT_COLUMNS: &str =
+    "id, title, description, status, created_at, updated_at, completed_at, version";
+
+fn status_column(status: TodoStatus) -> &'static str {
+    match status {
+        TodoStatus::NotStarted => "not_started",
+        TodoStatus::InProgress => "in_progress",
+        TodoStatus::Completed => "completed",
+    }
+}
+
+#[async_trait]
+impl TodoRepository for SqliteTodoRepository<'_> {
+    async fn find_latest(&mut self, limit: u32) -> Result<Vec<Todo>, RepositoryError> {
+        let query = format!(
+            "SELECT {SELECT_COLUMNS} FROM todos ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        );
+        sqlx::query_as::<_, TodoRow>(&query)
+            .bind(i64::from(limit))
+            .fetch_all(&mut **self.tx)
+            .await
+            .map_err(storage)?
+            .into_iter()
+            .map(|row| Ok(Snapshot::try_from(row)?.todo))
+            .collect()
+    }
+
+    async fn update(&mut self, todo: &Todo, expected_version: i64) -> Result<(), RepositoryError> {
+        let result = sqlx::query(
+            "UPDATE todos SET title = ?, description = ?, status = ?, updated_at = ?, completed_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+        )
+        .bind(todo.title().as_str())
+        .bind(todo.description().map(Description::as_str))
+        .bind(status_column(todo.status()))
+        .bind(todo.updated_at().timestamp_millis())
+        .bind(todo.completed_at().map(|at| at.timestamp_millis()))
+        .bind(todo.id().to_string())
+        .bind(expected_version)
+        .execute(&mut **self.tx)
+        .await
+        .map_err(storage)?;
+        if result.rows_affected() == 0 {
+            return Err(RepositoryError::Conflict);
+        }
+        Ok(())
+    }
+}
+```
+
+**行データからドメインモデルへの再構築（[`crates/infrastructure/src/todo/row.rs`](crates/infrastructure/src/todo/row.rs)）:**
+
+```rust
+#[derive(sqlx::FromRow)]
+pub(super) struct TodoRow {
+    id: String,
+    title: String,
+    description: Option<String>,
+    status: String,
+    created_at: i64,
+    updated_at: i64,
+    completed_at: Option<i64>,
+    version: i64,
+}
+
+impl TryFrom<TodoRow> for Snapshot {
+    type Error = RepositoryError;
+
+    fn try_from(row: TodoRow) -> Result<Self, Self::Error> {
+        let id = row.id.parse().map_err(storage)?;
+        let title = Title::try_from(row.title).map_err(storage)?;
+        let description = Description::from_optional(row.description).map_err(storage)?;
+        let created_at = timestamp_from_millis(row.created_at)?;
+        let updated_at = timestamp_from_millis(row.updated_at)?;
+
+        let state = match (row.status.as_str(), row.completed_at) {
+            ("not_started", None) => TodoState::NotStarted,
+            ("in_progress", None) => TodoState::InProgress,
+            ("completed", Some(at)) => TodoState::Completed {
+                completed_at: timestamp_from_millis(at)?,
+            },
+            _ => return Err(RepositoryError::Storage("Invalid stored Todo state".into())),
+        };
+
+        let todo = Todo::reconstitute(id, title, description, state, created_at, updated_at);
+        Ok(Snapshot {
+            todo,
+            version: row.version,
+        })
+    }
+}
+```
+
+---
+
+### 4. Presentation 層（`crates/presentation`）
+
+HTTP（axum のリクエスト・JSON・ステータスコード）とアプリケーション層のユースケースポートを橋渡しする層です。
+
+#### このレイヤーがすべきこと
+- HTTP ルーティングとハンドラ（`axum::Router`）を定義する。
+- カスタム Extractor（`TodoPath`, `TodoInput`）でパスや JSON ボディを解析し、ドメインの値オブジェクトへ変換する。
+- axum の `FromRef` を使い、各ハンドラが**自分が呼ぶ単一のユースケース trait だけ**を受け取るようにする。
+- API レスポンス用 DTO（`TodoResponse`）のシリアライズ（ミリ秒時刻やステータス文字列）と、`UseCaseError` / `ValidationError` から HTTP ステータスコードへの変換を担う。
+
+#### このレイヤーがすべきでないこと
+- `infrastructure`・`sqlx`・具象の `*UseCaseImpl` を import しない。
+- トランザクションを開始したりリポジトリを直接呼び出したりしない。
+- 業務遷移ルールを書いたり、ドメインの正規化ルールを重複実装したりしない（空文字の扱いは `Description::from_optional` へ委譲する）。
+- `domain::error::RepositoryError` を直接マッチしない（`UseCaseError` と `ValidationError` のみを扱う）。
+
+#### コード実例
+
+**カスタム Extractor（[`crates/presentation/src/todo/extract.rs`](crates/presentation/src/todo/extract.rs)）:**
+
+入力のパースと値オブジェクト生成を Extractor に寄せることで、ハンドラ本体は「ユースケース実行とレスポンス変換」だけに集中できます。
+
+```rust
+pub(super) struct TodoInput {
+    pub title: Title,
+    pub description: Option<Description>,
+}
+
+impl<S: Send + Sync> FromRequest<S> for TodoInput {
+    type Rejection = ApiError;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, ApiError> {
+        #[derive(Deserialize)]
+        struct Payload {
+            title: String,
+            description: Option<String>,
+        }
+        let Json(raw) = Json::<Payload>::from_request(request, state)
+            .await
+            .map_err(|e| ApiError(e.status(), e.body_text()))?;
+        Ok(Self {
+            title: Title::try_from(raw.title)?,
+            description: Description::from_optional(raw.description)?,
+        })
+    }
+}
+```
+
+**`FromRef` によるハンドラ単位の単一ユースケース注入（[`crates/presentation/src/todo/handlers.rs`](crates/presentation/src/todo/handlers.rs)）:**
+
+各ハンドラが自分の `Arc<dyn ...UseCase>` だけを受け取るため、`start` ハンドラから誤って `delete` を呼ぶといった結合が起きず、単体テストでも 1 つのスタブだけでハンドラを検証できます。
+
+```rust
+#[derive(Clone)]
+pub struct TodoUseCases {
+    pub create: Arc<dyn CreateTodoUseCase>,
+    pub find_by_id: Arc<dyn FindTodoByIdUseCase>,
+    pub find_todos: Arc<dyn FindTodosUseCase>,
+    pub update: Arc<dyn UpdateTodoUseCase>,
+    pub start: Arc<dyn StartTodoUseCase>,
+    pub complete: Arc<dyn CompleteTodoUseCase>,
+    pub delete: Arc<dyn DeleteTodoUseCase>,
+}
+
+impl FromRef<TodoUseCases> for Arc<dyn StartTodoUseCase> {
+    fn from_ref(state: &TodoUseCases) -> Self {
+        Arc::clone(&state.start)
+    }
+}
+// （残り 6 つのユースケースについても同様に FromRef を実装）
+
+pub fn router(usecases: TodoUseCases) -> Router {
+    Router::new()
+        .route("/todos", get(list).post(create))
+        .route("/todos/{id}", get(find).put(update).delete(remove))
+        .route("/todos/{id}/start", patch(start))
+        .route("/todos/{id}/complete", patch(complete))
+        .with_state(usecases)
+}
+
+async fn start(
+    State(usecase): State<Arc<dyn StartTodoUseCase>>,
+    TodoPath(id): TodoPath,
+) -> Result<Json<TodoResponse>, ApiError> {
+    Ok(Json(usecase.execute(id).await?.into()))
+}
+```
+
+**レスポンス変換と HTTP エラーマッピング（[`crates/presentation/src/todo/schema.rs`](crates/presentation/src/todo/schema.rs), [`crates/presentation/src/todo/error.rs`](crates/presentation/src/todo/error.rs)）:**
+
+```rust
+// crates/presentation/src/todo/schema.rs
+fn status_str(status: TodoStatus) -> &'static str {
+    match status {
+        TodoStatus::NotStarted => "not_started",
+        TodoStatus::InProgress => "in_progress",
+        TodoStatus::Completed => "completed",
+    }
+}
+
+impl From<Todo> for TodoResponse {
+    fn from(todo: Todo) -> Self {
+        Self {
+            id: todo.id().to_string(),
+            title: todo.title().as_str().into(),
+            description: todo
+                .description()
+                .map(Description::as_str)
+                .unwrap_or_default()
+                .into(),
+            status: status_str(todo.status()),
+            created_at: todo.created_at().timestamp_millis(),
+            updated_at: todo.updated_at().timestamp_millis(),
+            completed_at: todo.completed_at().map(|at| at.timestamp_millis()),
+        }
+    }
+}
+
+// crates/presentation/src/todo/error.rs
+impl From<UseCaseError> for ApiError {
+    fn from(error: UseCaseError) -> Self {
+        let status = match &error {
+            UseCaseError::NotFound => StatusCode::NOT_FOUND,
+            UseCaseError::Transition(_) => StatusCode::BAD_REQUEST,
+            UseCaseError::Conflict => StatusCode::CONFLICT,
+            UseCaseError::Unexpected(cause) => {
+                eprintln!("Repository error: {cause}");
+                return Self(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".into(),
+                );
+            }
+        };
+        Self(status, error.to_string())
+    }
+}
+```
+
+---
+
+### 5. Server 層 / Composition Root（`crates/server`）
+
+最も外側にある実行可能クレートであり、`infrastructure`・`application`・`presentation` の具象実装をすべて知ってよい**唯一の場所**です。
+
+#### このレイヤーがすべきこと
+- 環境変数（`DATABASE_URL`, `BIND_ADDR`）を読み込む。
+- 具象実装（`SqliteUnitOfWorkFactory` や各 `*UseCaseImpl`）を一度だけ生成し、`build_router` / `build_sqlite_app` でルーターへ配線する。
+- `main.rs` と HTTP 統合テスト（`tests/http.rs`）で同一の配線関数を共有し、本番とテストの DI 構成が乖離しないようにする。
+- レイヤー横断の検証テスト（HTTP 統合テスト、Hurl E2E テスト、`cargo metadata` による依存方向テスト）を配置する。
+
+#### このレイヤーがすべきでないこと
+- ドメインルール・SQL クエリ・HTTP ハンドラをここに書かない。
+- `sqlx` へ直接依存しない（`tests/layers.rs` で禁止を自動検査）。
+
+#### コード実例
+
+**Composition Root（[`crates/server/src/lib.rs`](crates/server/src/lib.rs)）:**
+
+```rust
+pub fn build_router(uow_factory: Arc<dyn UnitOfWorkFactory>) -> Router {
+    let todo_usecases = TodoUseCases {
+        create: Arc::new(CreateTodoUseCaseImpl::new(Arc::clone(&uow_factory))),
+        find_by_id: Arc::new(FindTodoByIdUseCaseImpl::new(Arc::clone(&uow_factory))),
+        find_todos: Arc::new(FindTodosUseCaseImpl::new(Arc::clone(&uow_factory))),
+        update: Arc::new(UpdateTodoUseCaseImpl::new(Arc::clone(&uow_factory))),
+        start: Arc::new(StartTodoUseCaseImpl::new(Arc::clone(&uow_factory))),
+        complete: Arc::new(CompleteTodoUseCaseImpl::new(Arc::clone(&uow_factory))),
+        delete: Arc::new(DeleteTodoUseCaseImpl::new(uow_factory)),
+    };
+
+    Router::new().merge(presentation::todo::router(todo_usecases))
+}
+
+pub async fn build_sqlite_app(database_url: &str) -> Result<Router, Box<dyn Error>> {
+    let pool = sqlite::connect(database_url).await?;
+    let uow_factory = Arc::new(SqliteUnitOfWorkFactory::new(pool));
+    Ok(build_router(uow_factory))
+}
+```
+
+---
+
+## `dddpy` との設計比較
 
 | 観点 | `dddpy`（Python） | `dddrs`（Rust） |
 | --- | --- | --- |
