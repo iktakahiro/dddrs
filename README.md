@@ -4,7 +4,7 @@
 
 English | [日本語](README.ja_JP.md)
 
-A practical **Domain-Driven Design (DDD)** and **Onion Architecture** example in **Rust**, built with [axum](https://github.com/tokio-rs/axum) and [SQLx](https://github.com/launchbadge/sqlx) (SQLite).
+A practical **Domain-Driven Design (DDD)** and **Onion Architecture** example and layer-by-layer reference guide in **Rust**, built with [axum](https://github.com/tokio-rs/axum) and [SQLx](https://github.com/launchbadge/sqlx) (SQLite).
 
 This repository is the Rust counterpart to:
 - Python implementation: [dddpy](https://github.com/iktakahiro/dddpy)
@@ -19,6 +19,7 @@ This repository is the Rust counterpart to:
 - **Database:** [SQLx](https://github.com/launchbadge/sqlx) 0.8 + SQLite (bundled, with migrations)
 - **Error Handling:** [thiserror](https://github.com/dtolnay/thiserror)
 - **Timestamps & IDs:** [chrono](https://github.com/chronotope/chrono), [uuid](https://github.com/uuid-rs/uuid)
+- **E2E Testing (optional):** [Hurl](https://hurl.dev/)
 
 ## Quick Start
 
@@ -80,7 +81,7 @@ Example response (`201 Created`):
 }
 ```
 
-## Architecture
+## Architecture Overview
 
 This Cargo workspace enforces **Onion Architecture** boundaries at compile time by isolating each layer in its own crate.
 
@@ -140,13 +141,15 @@ crates/
 │           ├── extract.rs        # TodoPath and TodoInput extractors
 │           ├── schema.rs         # TodoResponse serialization
 │           └── error.rs          # UseCaseError / ValidationError -> HTTP status
-└── server/                       # Composition root, binary entrypoint, integration & layer tests
+└── server/                       # Composition root, binary entrypoint, integration & E2E tests
     ├── src/
     │   ├── lib.rs                # build_router() and build_sqlite_app()
     │   └── main.rs
     └── tests/
         ├── http.rs               # In-process HTTP integration tests
-        └── layers.rs             # cargo metadata architectural boundary test
+        ├── layers.rs             # cargo metadata architectural boundary test
+        ├── e2e.rs                # Live-server Hurl runner
+        └── e2e/todos.hurl        # HTTP end-to-end scenario
 ```
 
 ### Compile-Time Dependency Rules
@@ -159,7 +162,7 @@ crates/
 | `presentation` | `application`, `domain` |
 | `server` | `presentation`, `application`, `infrastructure` |
 
-Because dependencies are declared per crate in `Cargo.toml`, importing `infrastructure` from `application` or `domain` fails to compile. In addition, [`crates/server/tests/layers.rs`](crates/server/tests/layers.rs) inspects `cargo metadata` in CI to fail the build if anyone widens a crate's manifest dependencies.
+Because dependencies are declared per crate in `Cargo.toml`, importing `infrastructure` from `application` or `domain` fails to compile. In addition, [`crates/server/tests/layers.rs`](crates/server/tests/layers.rs) inspects `cargo metadata` in CI to fail the build if anyone widens a crate's manifest dependencies or leaks `axum` / `sqlx` into inner crates.
 
 ### Request Flow (`PATCH /todos/{id}/start`)
 
@@ -171,39 +174,683 @@ Runtime control flows **inward and back out**, while compile-time dependencies a
 4. **Infrastructure** ([`sqlite.rs`](crates/infrastructure/src/sqlite.rs), [`repository.rs`](crates/infrastructure/src/todo/repository.rs)): Runs all repository queries on the active SQLite transaction with `WHERE id = ? AND version = ?` optimistic locking.
 5. **Server** ([`lib.rs`](crates/server/src/lib.rs)): Wires `SqliteUnitOfWorkFactory` into all use cases once at startup.
 
-## Key Design Decisions
+## Layer-by-Layer Design Guide
 
-### 1. Algebraic Data Type (ADT) for Illegal-State Prevention
+This section serves as a practical reference for what belongs in each layer—and just as importantly, what does **not**. Every code listing below is taken directly from this repository.
 
-In [`crates/domain/src/todo/entity.rs`](crates/domain/src/todo/entity.rs), `Todo` keeps all fields private and models lifecycle state with an enum:
+### Responsibility Summary
+
+| Layer | Should Do | Should NOT Do |
+| --- | --- | --- |
+| **Domain** (`crates/domain`) | Model entities, value objects, invariants, domain errors, and repository traits | Depend on HTTP, JSON/`serde`, SQL/`sqlx`, or transaction control |
+| **Application** (`crates/application`) | Orchestrate 1-struct-1-method use cases, control transaction boundaries (`UnitOfWork`), translate persistence errors | Duplicate entity business rules, write SQL, return HTTP status codes, or bundle unrelated operations into a god service |
+| **Infrastructure** (`crates/infrastructure`) | Implement `UnitOfWork` and repository traits, own SQL/migrations/pool config, map rows ↔ domain models | Make business transition decisions, hardcode application limits (`LIMIT 20`), handle HTTP, or leak `sqlx` types outward |
+| **Presentation** (`crates/presentation`) | Route HTTP requests, extract/validate payloads, call a single use case per handler, serialize responses & map HTTP errors | Access repositories/DB directly, manage transactions, implement business rules, inspect `RepositoryError`, or construct concrete `*Impl` structs |
+| **Server** (`crates/server`) | Read config/env, wire concrete implementations into traits, merge routers, start the listener | Contain business logic, execute SQL directly, or define HTTP handlers/DTOs |
+
+---
+
+### 1. Domain Layer (`crates/domain`)
+
+The center of the onion. It expresses the business model and rules using pure Rust types with zero knowledge of HTTP frameworks or databases.
+
+#### What this layer SHOULD do
+- Define **aggregates and entities** with private fields and behavior methods that protect invariants.
+- Use Rust's **Algebraic Data Types (enums with data)** to make illegal states unrepresentable.
+- Define **value objects** as validated newtypes (`TryFrom` / `FromStr` / `from_optional`) so primitive types cannot be confused.
+- Define **repository traits (ports)** and shared domain/persistence error enums (`TransitionError`, `ValidationError`, `RepositoryError`).
+- Represent domain concepts with proper types (`DateTime<Utc>`, `TodoStatus`), not wire-format primitives.
+
+#### What this layer SHOULD NOT do
+- **Do not** import `axum`, `sqlx`, or `serde` (no `#[derive(Serialize, Deserialize)]` or `#[derive(sqlx::FromRow)]` on domain entities).
+- **Do not** hardcode DB column strings or JSON representations inside entity methods (e.g., returning `"not_started"` strings from the entity).
+- **Do not** start, commit, or roll back database transactions.
+- **Do not** expose mutable public fields that allow callers to bypass domain invariants.
+
+#### Code Examples
+
+**Entity & ADT state ([`crates/domain/src/todo/entity.rs`](crates/domain/src/todo/entity.rs)):**
+
+Making `completed_at` part of `TodoState::Completed` ensures at compile time that an incomplete Todo can never hold a completion timestamp and a completed Todo always has one. `PartialEq` compares only `id`, following DDD entity identity semantics.
 
 ```rust
+/// Coarse lifecycle status of a Todo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TodoStatus {
+    NotStarted,
+    InProgress,
+    Completed,
+}
+
+/// Lifecycle state of a Todo.
+///
+/// Storing `completed_at` inside the `Completed` variant makes illegal states
+/// unrepresentable: an incomplete Todo cannot carry a completion timestamp, and
+/// a completed Todo always carries one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TodoState {
     NotStarted,
     InProgress,
     Completed { completed_at: DateTime<Utc> },
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum TransitionError {
+    #[error("Todo has not been started")]
+    NotStarted,
+    #[error("Todo has already been started")]
+    AlreadyStarted,
+    #[error("Todo has already been completed")]
+    AlreadyCompleted,
+}
+
+#[derive(Debug, Clone)]
+pub struct Todo {
+    id: TodoId,
+    title: Title,
+    description: Option<Description>,
+    state: TodoState,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl Todo {
+    pub fn start_at(&mut self, now: DateTime<Utc>) -> Result<(), TransitionError> {
+        match self.state {
+            TodoState::NotStarted => {
+                self.state = TodoState::InProgress;
+                self.updated_at = now;
+                Ok(())
+            }
+            TodoState::InProgress => Err(TransitionError::AlreadyStarted),
+            TodoState::Completed { .. } => Err(TransitionError::AlreadyCompleted),
+        }
+    }
+
+    pub fn complete_at(&mut self, now: DateTime<Utc>) -> Result<(), TransitionError> {
+        match self.state {
+            TodoState::NotStarted => Err(TransitionError::NotStarted),
+            TodoState::InProgress => {
+                self.state = TodoState::Completed { completed_at: now };
+                self.updated_at = now;
+                Ok(())
+            }
+            TodoState::Completed { .. } => Err(TransitionError::AlreadyCompleted),
+        }
+    }
+}
+
+impl PartialEq for Todo {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
 ```
 
-Making `completed_at` part of the `Completed` variant makes it **impossible at compile time** to represent an incomplete Todo with a completion timestamp or a completed Todo without one—without splitting the domain into separate typestate and persisted-enum types that become hard to scale across complex multi-entity models.
+**Value objects ([`crates/domain/src/todo/values.rs`](crates/domain/src/todo/values.rs)):**
 
-### 2. Newtype Value Objects & Encapsulation
+Validation and normalization rules live inside the value object constructors rather than being scattered across HTTP handlers. `Description::from_optional` normalizes `Some("")` to `None` so there is only one representation of an absent description.
 
-[`TodoId`, `Title`, and `Description`](crates/domain/src/todo/values.rs) wrap private fields and validate invariants on construction (`TryFrom` / `FromStr` / `Description::from_optional`). Distinct types prevent accidentally swapping a title and a description. Domain timestamps use `DateTime<Utc>`, while Unix millisecond encoding and status strings are confined to `infrastructure` and `presentation`.
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Title(String);
 
-### 3. One Struct, One Method per Use Case
+impl TryFrom<String> for Title {
+    type Error = ValidationError;
 
-Each operation in [`crates/application/src/todo/`](crates/application/src/todo) is implemented as its own trait and struct with a single `execute` method (matching `dddpy` and `oniongo`):
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
+        if raw.is_empty() || raw.chars().count() > 100 {
+            return Err(ValidationError::Title);
+        }
+        Ok(Self(raw))
+    }
+}
 
-- Handlers in `presentation` depend on only the single use case trait they call (injected via axum `FromRef`), enabling isolated handler unit tests without a database.
-- Cross-entity use cases can inject only the dependencies they need instead of bloating a god service.
-- If read workloads later require lightweight CQRS, read use cases such as `FindTodosUseCase` can switch to a dedicated query service without changing write use cases.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Description(String);
 
-### 4. Transactional Unit of Work
+impl Description {
+    /// Normalize an optional raw description into a domain value.
+    ///
+    /// Both `None` and an empty string represent an absent description (`None`),
+    /// avoiding duplicate representations of emptiness.
+    pub fn from_optional(raw: Option<String>) -> Result<Option<Self>, ValidationError> {
+        match raw {
+            None => Ok(None),
+            Some(value) if value.is_empty() => Ok(None),
+            Some(value) => Self::try_from(value).map(Some),
+        }
+    }
+}
+```
 
-[`UnitOfWork` and `UnitOfWorkFactory`](crates/application/src/uow.rs) place transaction boundaries in the application layer without leaking `sqlx` types inward. Repository methods take `&mut self`, matching Rust's ownership rules for a single SQLite transaction without runtime mutexes. When adding another entity, adding a repository accessor to `UnitOfWork` allows cross-aggregate updates to commit or roll back atomically.
+**Repository port & shared error ([`crates/domain/src/todo/repository.rs`](crates/domain/src/todo/repository.rs), [`crates/domain/src/error.rs`](crates/domain/src/error.rs)):**
 
-### Comparison with `dddpy`
+The trait is defined in `domain` (Dependency Inversion Principle) and takes `&mut self` so implementations can operate directly on an active database transaction without interior locks. `RepositoryError` lives in `domain::error` so sibling entities can reuse it.
+
+```rust
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    pub todo: Todo,
+    pub version: i64,
+}
+
+#[async_trait]
+pub trait TodoRepository: Send {
+    async fn insert(&mut self, todo: &Todo) -> Result<(), RepositoryError>;
+    async fn find_by_id(&mut self, id: TodoId) -> Result<Option<Snapshot>, RepositoryError>;
+    async fn find_latest(&mut self, limit: u32) -> Result<Vec<Todo>, RepositoryError>;
+    async fn update(&mut self, todo: &Todo, expected_version: i64) -> Result<(), RepositoryError>;
+    async fn delete(&mut self, id: TodoId) -> Result<bool, RepositoryError>;
+}
+```
+
+---
+
+### 2. Application Layer (`crates/application`)
+
+Coordinates domain objects and persistence ports to fulfill concrete user-facing operations. Each operation is modeled as a dedicated use case.
+
+#### What this layer SHOULD do
+- Follow the **1 Struct = 1 `execute` Method** principle: one file, one trait port, and one implementation struct per use case.
+- Define **transactional boundaries** through `UnitOfWork` / `UnitOfWorkFactory` ports, committing on success and rolling back on error.
+- Own application-level parameters and policies (such as `DEFAULT_LIST_LIMIT = 20`).
+- Translate low-level `RepositoryError` into application-level `UseCaseError` so outer layers do not depend on repository internals.
+- Provide fast unit tests using an in-memory `UnitOfWorkFactory` without touching a real database.
+
+#### What this layer SHOULD NOT do
+- **Do not** re-implement business rules (e.g., checking `todo.status() == TodoStatus::NotStarted` inside a use case instead of calling `todo.complete()`).
+- **Do not** depend on `infrastructure`, `presentation`, `sqlx`, or `axum`.
+- **Do not** aggregate unrelated CRUD operations into a single monolithic `TodoService` struct (which breaks down as soon as use cases span multiple entities).
+- **Do not** return HTTP status codes or JSON DTOs.
+
+#### Code Examples
+
+**Unit of Work ports ([`crates/application/src/uow.rs`](crates/application/src/uow.rs)):**
+
+Transactions are an application concern, not a domain concern. Adding a second entity (e.g., `Project`) means adding one repository accessor method here so a single use case can update both aggregates atomically.
+
+```rust
+#[async_trait]
+pub trait UnitOfWork: Send {
+    fn todos(&mut self) -> Box<dyn TodoRepository + '_>;
+
+    async fn commit(self: Box<Self>) -> Result<(), RepositoryError>;
+    async fn rollback(self: Box<Self>) -> Result<(), RepositoryError>;
+}
+
+#[async_trait]
+pub trait UnitOfWorkFactory: Send + Sync {
+    async fn begin(&self) -> Result<Box<dyn UnitOfWork>, RepositoryError>;
+}
+```
+
+**1-Struct-1-Method use case ([`crates/application/src/todo/create_todo.rs`](crates/application/src/todo/create_todo.rs)):**
+
+```rust
+#[async_trait]
+pub trait CreateTodoUseCase: Send + Sync {
+    async fn execute(
+        &self,
+        title: Title,
+        description: Option<Description>,
+    ) -> Result<Todo, UseCaseError>;
+}
+
+pub struct CreateTodoUseCaseImpl {
+    uow_factory: Arc<dyn UnitOfWorkFactory>,
+}
+
+impl CreateTodoUseCaseImpl {
+    pub fn new(uow_factory: Arc<dyn UnitOfWorkFactory>) -> Self {
+        Self { uow_factory }
+    }
+}
+
+#[async_trait]
+impl CreateTodoUseCase for CreateTodoUseCaseImpl {
+    async fn execute(
+        &self,
+        title: Title,
+        description: Option<Description>,
+    ) -> Result<Todo, UseCaseError> {
+        let mut uow = self.uow_factory.begin().await?;
+        let todo = Todo::new(title, description);
+        let inserted = uow.todos().insert(&todo).await;
+        if let Err(error) = inserted {
+            let _ = uow.rollback().await;
+            return Err(error.into());
+        }
+        uow.commit().await?;
+        Ok(todo)
+    }
+}
+```
+
+**Shared transactional helper & state-transition use case ([`crates/application/src/todo.rs`](crates/application/src/todo.rs), [`crates/application/src/todo/start_todo.rs`](crates/application/src/todo/start_todo.rs)):**
+
+Common load → mutate → optimistic-lock update → commit/rollback flow is kept private inside `application::todo`, keeping each individual use case concise and focused.
+
+```rust
+async fn update_in_tx(
+    uow_factory: &dyn UnitOfWorkFactory,
+    id: TodoId,
+    mutate: impl FnOnce(&mut Todo) -> Result<(), TransitionError>,
+) -> Result<Todo, UseCaseError> {
+    let mut uow = uow_factory.begin().await?;
+    let result: Result<Todo, UseCaseError> = async {
+        let snapshot = uow
+            .todos()
+            .find_by_id(id)
+            .await?
+            .ok_or(UseCaseError::NotFound)?;
+        let mut todo = snapshot.todo;
+        mutate(&mut todo)?;
+        uow.todos().update(&todo, snapshot.version).await?;
+        Ok(todo)
+    }
+    .await;
+
+    match result {
+        Ok(todo) => {
+            uow.commit().await?;
+            Ok(todo)
+        }
+        Err(error) => {
+            let _ = uow.rollback().await;
+            Err(error)
+        }
+    }
+}
+
+// crates/application/src/todo/start_todo.rs
+#[async_trait]
+impl StartTodoUseCase for StartTodoUseCaseImpl {
+    async fn execute(&self, id: TodoId) -> Result<Todo, UseCaseError> {
+        update_in_tx(self.uow_factory.as_ref(), id, Todo::start).await
+    }
+}
+```
+
+**Error translation ([`crates/application/src/todo/error.rs`](crates/application/src/todo/error.rs)):**
+
+```rust
+#[derive(Debug, Error)]
+pub enum UseCaseError {
+    #[error("Todo not found")]
+    NotFound,
+    #[error(transparent)]
+    Transition(#[from] TransitionError),
+    #[error("Todo changed since it was read")]
+    Conflict,
+    #[error("Unexpected repository failure")]
+    Unexpected(#[source] Box<dyn Error + Send + Sync>),
+}
+
+impl From<RepositoryError> for UseCaseError {
+    fn from(error: RepositoryError) -> Self {
+        match error {
+            RepositoryError::Conflict => Self::Conflict,
+            RepositoryError::Storage(source) => Self::Unexpected(source),
+        }
+    }
+}
+```
+
+> **Design note — Use Case traits vs. concrete structs:** This repository defines a `*UseCase` trait alongside each `*UseCaseImpl` struct (matching `dddpy` and `oniongo`) so presentation handlers depend only on abstractions and can be unit-tested with single-use-case stubs. In a production codebase that wants less boilerplate, you can keep the 1-struct-1-method structure while dropping the use case traits and keeping traits only at the `UnitOfWork` / repository boundary.
+
+---
+
+### 3. Infrastructure Layer (`crates/infrastructure`)
+
+Adapts external technologies (here, SQLite via SQLx) to the traits defined in `domain` and `application`.
+
+#### What this layer SHOULD do
+- Implement `UnitOfWorkFactory`, `UnitOfWork`, and repository traits (`TodoRepository`).
+- Own database connection configuration (`foreign_keys`, WAL mode, `busy_timeout`, SQL migrations).
+- Translate between database rows (`TodoRow`, SQL strings, millisecond integers) and domain objects (`Todo::reconstitute`, `TodoStatus`, `DateTime<Utc>`).
+- Enforce persistence-level safeguards: explicit SQL column lists (avoiding `SELECT *`), parameterized `LIMIT ?`, and optimistic-locking `WHERE id = ? AND version = ?` checks.
+- Convert `sqlx::Error` into `RepositoryError` at the boundary.
+
+#### What this layer SHOULD NOT do
+- **Do not** decide domain rules (such as whether a transition is permitted).
+- **Do not** hardcode application-level policies like `LIMIT 20` inside SQL queries—accept them as parameters from the use case.
+- **Do not** expose `TodoRow`, `sqlx::Error`, or raw `Transaction` types to inner layers or `presentation`.
+- **Do not** depend on `presentation` or `axum`.
+
+#### Code Examples
+
+**SQLite setup & Unit of Work implementation ([`crates/infrastructure/src/sqlite.rs`](crates/infrastructure/src/sqlite.rs)):**
+
+```rust
+pub async fn connect(url: &str) -> Result<SqlitePool, sqlx::Error> {
+    let options = url
+        .parse::<SqliteConnectOptions>()?
+        .create_if_missing(true)
+        .foreign_keys(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(Duration::from_secs(5));
+
+    // In-memory SQLite creates an isolated database per connection unless capped at 1.
+    let pool = if url == "sqlite::memory:" {
+        SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await?
+    } else {
+        SqlitePool::connect_with(options).await?
+    };
+
+    sqlx::migrate!().run(&pool).await?;
+    Ok(pool)
+}
+
+#[async_trait]
+impl UnitOfWorkFactory for SqliteUnitOfWorkFactory {
+    async fn begin(&self) -> Result<Box<dyn UnitOfWork>, RepositoryError> {
+        let tx = self.pool.begin().await.map_err(storage)?;
+        Ok(Box::new(SqliteUnitOfWork { tx }))
+    }
+}
+
+#[async_trait]
+impl UnitOfWork for SqliteUnitOfWork {
+    fn todos(&mut self) -> Box<dyn TodoRepository + '_> {
+        Box::new(SqliteTodoRepository::new(&mut self.tx))
+    }
+
+    async fn commit(self: Box<Self>) -> Result<(), RepositoryError> {
+        self.tx.commit().await.map_err(storage)
+    }
+
+    async fn rollback(self: Box<Self>) -> Result<(), RepositoryError> {
+        self.tx.rollback().await.map_err(storage)
+    }
+}
+```
+
+**Transaction-bound repository & optimistic locking ([`crates/infrastructure/src/todo/repository.rs`](crates/infrastructure/src/todo/repository.rs)):**
+
+Status-to-column mapping lives here rather than in `domain`, so changing database representations never touches domain types.
+
+```rust
+const SELECT_COLUMNS: &str =
+    "id, title, description, status, created_at, updated_at, completed_at, version";
+
+fn status_column(status: TodoStatus) -> &'static str {
+    match status {
+        TodoStatus::NotStarted => "not_started",
+        TodoStatus::InProgress => "in_progress",
+        TodoStatus::Completed => "completed",
+    }
+}
+
+#[async_trait]
+impl TodoRepository for SqliteTodoRepository<'_> {
+    async fn find_latest(&mut self, limit: u32) -> Result<Vec<Todo>, RepositoryError> {
+        let query = format!(
+            "SELECT {SELECT_COLUMNS} FROM todos ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        );
+        sqlx::query_as::<_, TodoRow>(&query)
+            .bind(i64::from(limit))
+            .fetch_all(&mut **self.tx)
+            .await
+            .map_err(storage)?
+            .into_iter()
+            .map(|row| Ok(Snapshot::try_from(row)?.todo))
+            .collect()
+    }
+
+    async fn update(&mut self, todo: &Todo, expected_version: i64) -> Result<(), RepositoryError> {
+        let result = sqlx::query(
+            "UPDATE todos SET title = ?, description = ?, status = ?, updated_at = ?, completed_at = ?, version = version + 1 WHERE id = ? AND version = ?",
+        )
+        .bind(todo.title().as_str())
+        .bind(todo.description().map(Description::as_str))
+        .bind(status_column(todo.status()))
+        .bind(todo.updated_at().timestamp_millis())
+        .bind(todo.completed_at().map(|at| at.timestamp_millis()))
+        .bind(todo.id().to_string())
+        .bind(expected_version)
+        .execute(&mut **self.tx)
+        .await
+        .map_err(storage)?;
+        if result.rows_affected() == 0 {
+            return Err(RepositoryError::Conflict);
+        }
+        Ok(())
+    }
+}
+```
+
+**Row-to-domain reconstitution ([`crates/infrastructure/src/todo/row.rs`](crates/infrastructure/src/todo/row.rs)):**
+
+```rust
+#[derive(sqlx::FromRow)]
+pub(super) struct TodoRow {
+    id: String,
+    title: String,
+    description: Option<String>,
+    status: String,
+    created_at: i64,
+    updated_at: i64,
+    completed_at: Option<i64>,
+    version: i64,
+}
+
+impl TryFrom<TodoRow> for Snapshot {
+    type Error = RepositoryError;
+
+    fn try_from(row: TodoRow) -> Result<Self, Self::Error> {
+        let id = row.id.parse().map_err(storage)?;
+        let title = Title::try_from(row.title).map_err(storage)?;
+        let description = Description::from_optional(row.description).map_err(storage)?;
+        let created_at = timestamp_from_millis(row.created_at)?;
+        let updated_at = timestamp_from_millis(row.updated_at)?;
+
+        let state = match (row.status.as_str(), row.completed_at) {
+            ("not_started", None) => TodoState::NotStarted,
+            ("in_progress", None) => TodoState::InProgress,
+            ("completed", Some(at)) => TodoState::Completed {
+                completed_at: timestamp_from_millis(at)?,
+            },
+            _ => return Err(RepositoryError::Storage("Invalid stored Todo state".into())),
+        };
+
+        let todo = Todo::reconstitute(id, title, description, state, created_at, updated_at);
+        Ok(Snapshot {
+            todo,
+            version: row.version,
+        })
+    }
+}
+```
+
+---
+
+### 4. Presentation Layer (`crates/presentation`)
+
+Translates between HTTP (axum requests, JSON payloads, status codes) and the application's use case ports.
+
+#### What this layer SHOULD do
+- Define routes and HTTP handlers (`axum::Router`).
+- Parse and validate HTTP inputs into domain value objects via custom axum extractors (`TodoPath`, `TodoInput`).
+- Inject **only the single use case trait** each handler needs using axum's `FromRef`.
+- Own API response DTOs (`TodoResponse`), JSON field formatting (millisecond timestamps, status strings), and HTTP error mapping (`UseCaseError` / `ValidationError` → `ApiError`).
+
+#### What this layer SHOULD NOT do
+- **Do not** import `infrastructure`, `sqlx`, or concrete `*UseCaseImpl` types.
+- **Do not** open transactions or call repositories directly.
+- **Do not** contain business transition rules or duplicate domain normalization logic (e.g., delegate optional description normalization to `Description::from_optional`).
+- **Do not** match on `domain::error::RepositoryError`—handle only `UseCaseError` and `ValidationError`.
+
+#### Code Examples
+
+**Custom extractors ([`crates/presentation/src/todo/extract.rs`](crates/presentation/src/todo/extract.rs)):**
+
+Handlers receive already-validated `TodoId`, `Title`, and `Option<Description>`, keeping handler bodies focused purely on calling their use case and formatting the response.
+
+```rust
+pub(super) struct TodoInput {
+    pub title: Title,
+    pub description: Option<Description>,
+}
+
+impl<S: Send + Sync> FromRequest<S> for TodoInput {
+    type Rejection = ApiError;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, ApiError> {
+        #[derive(Deserialize)]
+        struct Payload {
+            title: String,
+            description: Option<String>,
+        }
+        let Json(raw) = Json::<Payload>::from_request(request, state)
+            .await
+            .map_err(|e| ApiError(e.status(), e.body_text()))?;
+        Ok(Self {
+            title: Title::try_from(raw.title)?,
+            description: Description::from_optional(raw.description)?,
+        })
+    }
+}
+```
+
+**Single-use-case handler injection via `FromRef` ([`crates/presentation/src/todo/handlers.rs`](crates/presentation/src/todo/handlers.rs)):**
+
+Because each handler extracts only its own `Arc<dyn ...UseCase>`, `start` cannot accidentally call `delete`, and unit tests can mount a single route with a single stub without mocking all seven use cases.
+
+```rust
+#[derive(Clone)]
+pub struct TodoUseCases {
+    pub create: Arc<dyn CreateTodoUseCase>,
+    pub find_by_id: Arc<dyn FindTodoByIdUseCase>,
+    pub find_todos: Arc<dyn FindTodosUseCase>,
+    pub update: Arc<dyn UpdateTodoUseCase>,
+    pub start: Arc<dyn StartTodoUseCase>,
+    pub complete: Arc<dyn CompleteTodoUseCase>,
+    pub delete: Arc<dyn DeleteTodoUseCase>,
+}
+
+impl FromRef<TodoUseCases> for Arc<dyn StartTodoUseCase> {
+    fn from_ref(state: &TodoUseCases) -> Self {
+        Arc::clone(&state.start)
+    }
+}
+// (Same FromRef implementation for the remaining six use cases.)
+
+pub fn router(usecases: TodoUseCases) -> Router {
+    Router::new()
+        .route("/todos", get(list).post(create))
+        .route("/todos/{id}", get(find).put(update).delete(remove))
+        .route("/todos/{id}/start", patch(start))
+        .route("/todos/{id}/complete", patch(complete))
+        .with_state(usecases)
+}
+
+async fn start(
+    State(usecase): State<Arc<dyn StartTodoUseCase>>,
+    TodoPath(id): TodoPath,
+) -> Result<Json<TodoResponse>, ApiError> {
+    Ok(Json(usecase.execute(id).await?.into()))
+}
+```
+
+**Response serialization & HTTP error mapping ([`crates/presentation/src/todo/schema.rs`](crates/presentation/src/todo/schema.rs), [`crates/presentation/src/todo/error.rs`](crates/presentation/src/todo/error.rs)):**
+
+```rust
+// crates/presentation/src/todo/schema.rs
+fn status_str(status: TodoStatus) -> &'static str {
+    match status {
+        TodoStatus::NotStarted => "not_started",
+        TodoStatus::InProgress => "in_progress",
+        TodoStatus::Completed => "completed",
+    }
+}
+
+impl From<Todo> for TodoResponse {
+    fn from(todo: Todo) -> Self {
+        Self {
+            id: todo.id().to_string(),
+            title: todo.title().as_str().into(),
+            description: todo
+                .description()
+                .map(Description::as_str)
+                .unwrap_or_default()
+                .into(),
+            status: status_str(todo.status()),
+            created_at: todo.created_at().timestamp_millis(),
+            updated_at: todo.updated_at().timestamp_millis(),
+            completed_at: todo.completed_at().map(|at| at.timestamp_millis()),
+        }
+    }
+}
+
+// crates/presentation/src/todo/error.rs
+impl From<UseCaseError> for ApiError {
+    fn from(error: UseCaseError) -> Self {
+        let status = match &error {
+            UseCaseError::NotFound => StatusCode::NOT_FOUND,
+            UseCaseError::Transition(_) => StatusCode::BAD_REQUEST,
+            UseCaseError::Conflict => StatusCode::CONFLICT,
+            UseCaseError::Unexpected(cause) => {
+                eprintln!("Repository error: {cause}");
+                return Self(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".into(),
+                );
+            }
+        };
+        Self(status, error.to_string())
+    }
+}
+```
+
+---
+
+### 5. Server / Composition Root (`crates/server`)
+
+The outermost executable crate—the **only** place that knows about concrete implementations across `infrastructure`, `application`, and `presentation`.
+
+#### What this layer SHOULD do
+- Read runtime configuration (`DATABASE_URL`, `BIND_ADDR`).
+- Instantiate concrete adapters (`SqliteUnitOfWorkFactory`) and wire them into use cases and routers in one place (`build_router` / `build_sqlite_app`).
+- Reuse that exact wiring function in both `main.rs` and HTTP integration tests (`tests/http.rs`) so test and production graphs never drift.
+- Host cross-cutting tests: end-to-end HTTP tests and the `cargo metadata` layer-boundary test (`tests/layers.rs`).
+
+#### What this layer SHOULD NOT do
+- **Do not** put domain logic, SQL queries, or HTTP handlers here.
+- **Do not** depend directly on `sqlx` (enforced by `tests/layers.rs`).
+
+#### Code Example
+
+**Composition root ([`crates/server/src/lib.rs`](crates/server/src/lib.rs)):**
+
+```rust
+pub fn build_router(uow_factory: Arc<dyn UnitOfWorkFactory>) -> Router {
+    let todo_usecases = TodoUseCases {
+        create: Arc::new(CreateTodoUseCaseImpl::new(Arc::clone(&uow_factory))),
+        find_by_id: Arc::new(FindTodoByIdUseCaseImpl::new(Arc::clone(&uow_factory))),
+        find_todos: Arc::new(FindTodosUseCaseImpl::new(Arc::clone(&uow_factory))),
+        update: Arc::new(UpdateTodoUseCaseImpl::new(Arc::clone(&uow_factory))),
+        start: Arc::new(StartTodoUseCaseImpl::new(Arc::clone(&uow_factory))),
+        complete: Arc::new(CompleteTodoUseCaseImpl::new(Arc::clone(&uow_factory))),
+        delete: Arc::new(DeleteTodoUseCaseImpl::new(uow_factory)),
+    };
+
+    Router::new().merge(presentation::todo::router(todo_usecases))
+}
+
+pub async fn build_sqlite_app(database_url: &str) -> Result<Router, Box<dyn Error>> {
+    let pool = sqlite::connect(database_url).await?;
+    let uow_factory = Arc::new(SqliteUnitOfWorkFactory::new(pool));
+    Ok(build_router(uow_factory))
+}
+```
+
+---
+
+## Comparison with `dddpy`
 
 | Concept | `dddpy` (Python) | `dddrs` (Rust) |
 | --- | --- | --- |
