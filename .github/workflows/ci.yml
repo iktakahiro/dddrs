@@ -18,3 +18,16 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - name: Install Hurl
+        env:
+          HURL_VERSION: 8.0.1
+          HURL_SHA256: cac7c4670d69444db120edb21fe06c97ba8c80dcc52279957c8dd18f05fb0c06
+        working-directory: ${{ runner.temp }}
+        run: |
+          archive="hurl-${HURL_VERSION}-x86_64-unknown-linux-gnu"
+          curl -fsSL "https://github.com/Orange-OpenSource/hurl/releases/download/${HURL_VERSION}/${archive}.tar.gz" -o hurl.tar.gz
+          echo "${HURL_SHA256}  hurl.tar.gz" | sha256sum --check
+          tar -xzf hurl.tar.gz
+          echo "${RUNNER_TEMP}/${archive}/bin" >> "$GITHUB_PATH"
+      - name: Exercise the running API with Hurl
+        run: cargo test --locked -p server --test e2e -- --ignored --nocapture
