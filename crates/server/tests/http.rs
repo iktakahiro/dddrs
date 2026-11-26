@@ -1,17 +1,18 @@
-use application::TodoService;
+use application::todo::TodoService;
 use axum::{
     Router,
     body::{Body, to_bytes},
     http::{Method, Request, StatusCode},
 };
-use infrastructure::SqliteTodoRepository;
+use infrastructure::{sqlite, todo::SqliteTodoRepository};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tower::ServiceExt;
 
 async fn app(url: &str) -> Router {
-    let repository = SqliteTodoRepository::connect(url).await.unwrap();
-    presentation::router(TodoService::new(Arc::new(repository)))
+    let pool = sqlite::connect(url).await.unwrap();
+    let repository = SqliteTodoRepository::new(pool);
+    presentation::todo::router(TodoService::new(Arc::new(repository)))
 }
 
 async fn request(

@@ -1,11 +1,11 @@
-use crate::storage;
+use super::storage;
 use domain::todo::{
     self, Completed, Description, InProgress, NotStarted, RepositoryError, Snapshot, StoredTodo,
     Title, Todo,
 };
 
 #[derive(sqlx::FromRow)]
-pub(crate) struct TodoRow {
+pub(super) struct TodoRow {
     id: String,
     title: String,
     description: Option<String>,

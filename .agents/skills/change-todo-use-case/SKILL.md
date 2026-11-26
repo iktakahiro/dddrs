@@ -5,7 +5,7 @@ description: Use when adding or changing Todo behavior or HTTP operations in ddd
 
 # Change a Todo use case
 
-Follow the [Rust API Guidelines for naming](https://rust-lang.github.io/api-guidelines/naming.html). Put entity-specific names under their entity module (for example, `domain::todo::Details`), not at the crate root.
+Follow the [Rust API Guidelines for naming](https://rust-lang.github.io/api-guidelines/naming.html). Keep each layer's `lib.rs` limited to module declarations. Put Todo behavior under its `todo` module (for example, `domain::todo::Details` and `infrastructure::todo::SqliteTodoRepository`). Other entities get sibling modules, not branches in Todo code. Reuse the SQLite pool opened at startup.
 
 1. Check the README's API table. Identify which behavior must match dddpy (lifecycle, status codes, character limits, list order) and which constraints can be expressed in Rust's types.
 2. Put business rules in `crates/domain`. Validate newtypes on construction. Edit through `&mut self`; consume `self` for transitions that change the type. Add a `compile_fail` example for a newly prohibited call.

@@ -7,7 +7,7 @@ use axum::{
 use domain::todo::{Description, Title, TodoId};
 use serde::Deserialize;
 
-pub(crate) struct TodoPath(pub TodoId);
+pub(super) struct TodoPath(pub TodoId);
 
 impl<S: Send + Sync> FromRequestParts<S> for TodoPath {
     type Rejection = ApiError;
@@ -22,7 +22,7 @@ impl<S: Send + Sync> FromRequestParts<S> for TodoPath {
     }
 }
 
-pub(crate) struct TodoInput {
+pub(super) struct TodoInput {
     pub title: Title,
     pub description: Option<Description>,
 }

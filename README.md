@@ -30,9 +30,9 @@ curl -fsS "$base/$id"
 
 Trace `PATCH /todos/{id}/start` to see why **runtime calls and compile-time dependencies point in different directions**:
 
-1. The [presentation handler](crates/presentation/src/lib.rs) receives the request. Its [extractor](crates/presentation/src/extract.rs) parses the path into a `TodoId`.
-2. In [application](crates/application/src/lib.rs), `TodoService::start` reads the Todo through the [repository trait](crates/domain/src/todo/repository.rs) and asks the [domain](crates/domain/src/todo.rs) to start it.
-3. The [infrastructure adapter](crates/infrastructure/src/lib.rs) implements that trait with sqlx. The update only succeeds if the stored version still matches the one read, so a stale write cannot undo a later transition.
+1. The [presentation handler](crates/presentation/src/todo/handlers.rs) receives the request. Its [extractor](crates/presentation/src/todo/extract.rs) parses the path into a `TodoId`.
+2. In [application](crates/application/src/todo/service.rs), `TodoService::start` reads the Todo through the [repository trait](crates/domain/src/todo/repository.rs) and asks the [domain](crates/domain/src/todo.rs) to start it.
+3. The [infrastructure adapter](crates/infrastructure/src/todo/repository.rs) implements that trait with sqlx. The update only succeeds if the stored version still matches the one read, so a stale write cannot undo a later transition.
 4. Presentation converts the result to JSON. Only the [server](crates/server/src/main.rs) chooses the concrete repository, once at startup.
 
 | Crate | Direct workspace dependencies |
@@ -43,9 +43,19 @@ Trace `PATCH /todos/{id}/start` to see why **runtime calls and compile-time depe
 | presentation | application, domain |
 | server (startup and wiring) | presentation, application, infrastructure |
 
-Each crate declares its dependencies in its own `Cargo.toml`. Importing `infrastructure::SqliteTodoRepository` from application fails to compile because infrastructure isn't a declared dependency. The [dependency test](crates/server/tests/layers.rs) also catches an attempt to relax the boundary by adding it to the manifest.
+Each crate declares its dependencies in its own `Cargo.toml`. Importing `infrastructure::todo::SqliteTodoRepository` from application fails to compile because infrastructure isn't a declared dependency. The [dependency test](crates/server/tests/layers.rs) also catches an attempt to relax the boundary by adding it to the manifest.
 
 The domain groups public types by entity rather than re-exporting them at the crate root. For example, `domain::todo::Details` and `domain::todo::Title` belong to a Todo; another entity can use the same short names in its own module.
+
+## Adding another entity
+
+Each layer's `lib.rs` only declares modules. To add a Project, for example:
+
+1. Add a sibling `project` module in each layer that needs it. Its domain types and repository trait live under `domain::project`; its use cases live under `application::project`.
+2. Put Project queries and row conversions in `crates/infrastructure/src/project/`, alongside `todo/`. Add a migration to the shared migrations directory. At startup, [open one SQLite pool](crates/infrastructure/src/sqlite.rs) and pass a clone to each repository.
+3. Put Project handlers, extractors, and responses under `presentation::project`. Wire its service in the server and combine the entity routers with axum's `Router::merge`.
+
+The sample implements only Todo. Adding an independent entity doesn't require editing Todo's service, repository, or handlers.
 
 ## What Rust enforces
 
@@ -64,7 +74,7 @@ let done = active.complete();          // Todo<Completed> carries the completion
 | --- | --- |
 | Value objects are frozen dataclasses. | [Title, Description, and TodoId](crates/domain/src/todo/values.rs) are newtypes with private fields. Unlike TypeScript type aliases, they're distinct types: a raw string or a description can't stand in for a title. Input length and UUID syntax still need runtime validation. |
 | Entity methods mutate the Todo. | Editing takes an exclusive borrow (`&mut self`). A transition that changes the type takes ownership (`self`) and returns the new type. Compile-fail tests cover the two invalid calls above. |
-| The domain branches on the state read from storage. | The compiler can't know the contents of a row. The [row conversion](crates/infrastructure/src/row.rs) builds a `StoredTodo` enum; a `match` selects one of its three variants before calling the typed transition. |
+| The domain branches on the state read from storage. | The compiler can't know the contents of a row. The [row conversion](crates/infrastructure/src/todo/row.rs) builds a `StoredTodo` enum; a `match` selects one of its three variants before calling the typed transition. |
 | A Protocol lets the application swap repository implementations. | A trait plays a similar role to a Go interface, except the adapter explicitly declares `impl TodoRepository for ...`. Requests share the implementation through `Arc<dyn TodoRepository>`; `async_trait` makes its asynchronous methods callable through this trait object. |
 
 ## API

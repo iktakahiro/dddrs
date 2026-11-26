@@ -2,7 +2,7 @@ use domain::todo::{Description, StoredTodo};
 use serde::Serialize;
 
 #[derive(Serialize)]
-pub(crate) struct TodoResponse {
+pub(super) struct TodoResponse {
     id: String,
     title: String,
     description: String,
