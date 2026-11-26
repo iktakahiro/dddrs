@@ -10,6 +10,11 @@ This repository is the Rust counterpart to:
 - Python implementation: [dddpy](https://github.com/iktakahiro/dddpy)
 - Go implementation: [oniongo](https://github.com/iktakahiro/oniongo)
 
+Key highlights of this Rust implementation:
+- **Type-enforced state:** Illegal states are unrepresentable via the `TodoState` ADT and validated newtypes ([Domain Layer](#1-domain-layer-cratesdomain)).
+- **Crate boundaries + CI checks:** Separate Cargo crates isolate each layer, and CI inspects `cargo metadata` to verify the allowed dependency directions ([Layer Boundaries and CI Checks](#layer-boundaries-and-ci-checks)).
+- **Python comparison:** Side-by-side comparison against the same Todo API in `dddpy` ([Comparison with `dddpy`](#comparison-with-dddpy)).
+
 > **Note:** This repository is a foundational architecture sample. It intentionally omits authentication, authorization, rate limiting, and production observability. Add those before deploying a derived service to production.
 
 ## Tech Stack
@@ -83,7 +88,7 @@ Example response (`201 Created`):
 
 ## Architecture Overview
 
-This Cargo workspace enforces **Onion Architecture** boundaries at compile time by isolating each layer in its own crate.
+This Cargo workspace separates each **Onion Architecture** layer into its own crate (blocking undeclared imports and circular dependencies at compile time), and verifies the allowed dependency directions in CI.
 
 ```mermaid
 flowchart TD
@@ -152,7 +157,7 @@ crates/
         └── e2e/todos.hurl        # HTTP end-to-end scenario
 ```
 
-### Compile-Time Dependency Rules
+### Layer Boundaries and CI Checks
 
 | Crate | Allowed Workspace Dependencies |
 | --- | --- |
@@ -162,7 +167,7 @@ crates/
 | `presentation` | `application`, `domain` |
 | `server` | `presentation`, `application`, `infrastructure` |
 
-Because dependencies are declared per crate in `Cargo.toml`, importing `infrastructure` from `application` or `domain` fails to compile. In addition, [`crates/server/tests/layers.rs`](crates/server/tests/layers.rs) inspects `cargo metadata` in CI to fail the build if anyone widens a crate's manifest dependencies or leaks `axum` / `sqlx` into inner crates.
+Splitting layers into separate crates prevents accidental undeclared imports and circular dependencies at compile time, while [`crates/server/tests/layers.rs`](crates/server/tests/layers.rs) inspects `cargo metadata` in CI to enforce the allowed dependency directions above and ensure `axum` / `sqlx` never leak into inner crates.
 
 ### Request Flow (`PATCH /todos/{id}/start`)
 
@@ -337,6 +342,8 @@ pub trait TodoRepository: Send {
 }
 ```
 
+> **Design note — Why `Snapshot` exposes `version`:** Optimistic-locking versions are a persistence concern, so you can also keep them inside the aggregate itself or track loaded versions privately inside `UnitOfWork` (an identity-map style) to hide `version` completely from `domain`. This sample intentionally models `Snapshot { todo, version }` explicitly on the repository port to keep the aggregate free of storage columns and keep the `UnitOfWork` stateless and easy to follow.
+
 ---
 
 ### 2. Application Layer (`crates/application`)
@@ -493,7 +500,7 @@ impl From<RepositoryError> for UseCaseError {
 }
 ```
 
-> **Design note — Use Case traits vs. concrete structs:** This repository defines a `*UseCase` trait alongside each `*UseCaseImpl` struct (matching `dddpy` and `oniongo`) so presentation handlers depend only on abstractions and can be unit-tested with single-use-case stubs. In a production codebase that wants less boilerplate, you can keep the 1-struct-1-method structure while dropping the use case traits and keeping traits only at the `UnitOfWork` / repository boundary.
+> **Design note — Use Case traits, `Arc<dyn ...>`, and `#[async_trait]`:** This repository defines a `*UseCase` trait alongside each `*UseCaseImpl` struct (matching `dddpy` and `oniongo`) so presentation handlers depend only on abstractions and can be unit-tested with single-use-case stubs. Although native `async fn` in traits is stable in Rust, trait objects (`Arc<dyn ...UseCase>`, `Box<dyn UnitOfWork>`, `Box<dyn TodoRepository>`) still require dyn-compatibility, which is why `#[async_trait]` (boxing the returned `Future`) is used here. In a production codebase that wants less boilerplate or static dispatch, you can keep the 1-struct-1-method structure with concrete use case structs and keep traits only at the `UnitOfWork` / repository boundary.
 
 ---
 
@@ -859,7 +866,7 @@ pub async fn build_sqlite_app(database_url: &str) -> Result<Router, Box<dyn Erro
 
 | Concept | `dddpy` (Python) | `dddrs` (Rust) |
 | --- | --- | --- |
-| Layer boundaries | Package conventions | Enforced by Cargo crates + `cargo metadata` test |
+| Layer boundaries | Package conventions | Separate crates + CI `cargo metadata` direction check |
 | Value objects | `@dataclass(frozen=True)` | Private-field newtypes (`TryFrom` / `FromStr`) |
 | Lifecycle invariants | Runtime checks on `TodoStatus` | `TodoState` ADT (`Completed { completed_at }`) |
 | Use cases | 1 class / 1 `execute` method + `Protocol` | 1 struct / 1 `execute` method + `trait` |
@@ -896,6 +903,8 @@ All API errors return JSON in the form `{"detail": "<message>"}`:
 | `415 Unsupported Media Type` | Missing or invalid `Content-Type: application/json` |
 | `422 Unprocessable Entity` | Invalid UUID, missing required field, or domain validation failure |
 | `500 Internal Server Error` | Unexpected storage error |
+
+> **Note:** Invalid lifecycle transitions return `400 Bad Request` here to keep API compatibility with [dddpy](https://github.com/iktakahiro/dddpy). In greenfield REST APIs, returning `409 Conflict` or `422 Unprocessable Entity` is another common convention when the request payload is valid but conflicts with the resource's current state.
 
 ## Adding Another Entity
 

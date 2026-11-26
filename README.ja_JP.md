@@ -10,6 +10,11 @@
 - Python 版: [dddpy](https://github.com/iktakahiro/dddpy)
 - Go 版: [oniongo](https://github.com/iktakahiro/oniongo)
 
+この Rust 版の主な特徴:
+- **型で守る状態:** `TodoState` ADT と検証済み newtype で不正な状態を表現不可能にします（[Domain 層](#1-domain-層cratesdomain)）。
+- **クレート境界 + CI で守る層:** 層ごとに Cargo クレートを分け、許可する依存方向は CI の `cargo metadata` テストで検査します（[クレート境界と CI による依存チェック](#クレート境界と-ci-による依存チェック)）。
+- **Python（`dddpy`）との比較:** 同じ Todo API を題材に言語・設計の違いを整理しています（[`dddpy` との設計比較](#dddpy-との設計比較)）。
+
 > **注意:** このリポジトリはアーキテクチャ設計のベースとなるリファレンスサンプルです。認証・認可・レート制限・本番向けロギング等は意図的に省いています。実サービスへ応用する際は、これらを適切に実装してください。
 
 ## 技術スタック
@@ -83,7 +88,7 @@ curl -fsS -i -X DELETE "$BASE_URL/todos/$TODO_ID"
 
 ## アーキテクチャ概要
 
-Cargo ワークスペースで各層を独立したクレートに分割し、**オニオンアーキテクチャの依存方向をコンパイル時に強制**しています。
+Cargo ワークスペースで**オニオンアーキテクチャの各層を独立したクレートに分けて境界を切り**（未宣言クレートの参照や循環依存はコンパイル時に防止）、許可する依存方向は CI で検査しています。
 
 ```mermaid
 flowchart TD
@@ -152,7 +157,7 @@ crates/
         └── e2e/todos.hurl        # HTTP E2E シナリオ
 ```
 
-### クレート間の依存ルール
+### クレート境界と CI による依存チェック
 
 | クレート | 直接依存できるワークスペース内クレート |
 | --- | --- |
@@ -162,7 +167,7 @@ crates/
 | `presentation` | `application`、`domain` |
 | `server` | `presentation`、`application`、`infrastructure` |
 
-別クレートを参照するには自身の `Cargo.toml` に依存宣言が必要なため、たとえば `application` や `domain` から `infrastructure` を参照しようとしてもコンパイルエラーになります。さらに、[`crates/server/tests/layers.rs`](crates/server/tests/layers.rs) が CI 上で `cargo metadata` を検査し、`Cargo.toml` への依存追加による境界違反や、`axum` / `sqlx` の内側クレートへの流出を防いでいます。
+層ごとにクレートを分けることで未宣言クレートの参照や循環依存をコンパイル時に防ぎ、許可する依存方向そのものは [`crates/server/tests/layers.rs`](crates/server/tests/layers.rs) が CI 上で `cargo metadata` を検査して保証しています（`axum` / `sqlx` の内側クレートへの流出もあわせて検出します）。
 
 ### リクエスト処理の流れ（`PATCH /todos/{id}/start`）
 
@@ -337,6 +342,8 @@ pub trait TodoRepository: Send {
 }
 ```
 
+> **設計メモ — `Snapshot` に `version` を置いている理由:** 楽観ロック用のバージョン番号は本来永続化側の関心ごとであり、集約の内部に持たせる設計や、`UnitOfWork` 実装の内部（Identity Map 等）で追跡して `domain` から完全に隠蔽する設計も成り立ちます。本サンプルでは、`Todo` 集約自体に DB カラム都合のフィールドを混ぜないことと、`UnitOfWork` をステートレスで追いやすく保つことを優先し、リポジトリポート上で `Snapshot { todo, version }` として明示的に扱うトレードオフを選んでいます。
+
 ---
 
 ### 2. Application 層（`crates/application`）
@@ -493,7 +500,7 @@ impl From<RepositoryError> for UseCaseError {
 }
 ```
 
-> **設計メモ — UseCase の trait 化と具象 Struct のみ構成のトレードオフ:** このサンプルでは `dddpy` / `oniongo` と足並みを揃え、Presentation 層の単体テストで単一ユースケースだけをスタブ差し替えできるよう `*UseCase` trait と `*UseCaseImpl` を対で定義しています。ボイラープレートを抑えたい実務案件では、1 Struct 1 Method の分割を維持したまま UseCase 側の trait を省き、`UnitOfWork` / リポジトリ境界だけを trait にする構成も有力な選択肢です。
+> **設計メモ — UseCase の trait 化・`Arc<dyn ...>`・`#[async_trait]` のトレードオフ:** このサンプルでは `dddpy` / `oniongo` と足並みを揃え、Presentation 層の単体テストで単一ユースケースだけをスタブ差し替えできるよう `*UseCase` trait と `*UseCaseImpl` を対で定義しています。なお Rust では trait 内の素の `async fn` 自体は安定化していますが、`Arc<dyn ...UseCase>` や `Box<dyn UnitOfWork>` / `Box<dyn TodoRepository>` のように trait オブジェクト（動的ディスパッチ）として扱うには現時点で dyn-compatibility が必要なため、返り値の `Future` を `Box` 化する `#[async_trait]` を採用しています。ボイラープレートや動的ディスパッチを抑えたい実務案件では、1 Struct 1 Method の分割を維持したまま UseCase 側を具象 Struct とし、`UnitOfWork` / リポジトリ境界だけを trait にする構成も有力な選択肢です。
 
 ---
 
@@ -859,7 +866,7 @@ pub async fn build_sqlite_app(database_url: &str) -> Result<Router, Box<dyn Erro
 
 | 観点 | `dddpy`（Python） | `dddrs`（Rust） |
 | --- | --- | --- |
-| 層の境界 | パッケージ構成・規約で維持 | Cargo クレート分割 + `cargo metadata` テストで強制 |
+| 層の境界 | パッケージ構成・規約で維持 | クレート境界分割 + CI の `cargo metadata` 依存方向検査 |
 | 値オブジェクト | `@dataclass(frozen=True)` | 非公開フィールドの newtype（`TryFrom` / `FromStr`） |
 | 状態遷移と不変条件 | `TodoStatus` に対する実行時チェック | `TodoState` ADT（`Completed { completed_at }`） |
 | ユースケース | 1 クラス・1 `execute` メソッド + `Protocol` | 1 構造体・1 `execute` メソッド + `trait` |
@@ -896,6 +903,8 @@ pub async fn build_sqlite_app(database_url: &str) -> Result<Router, Box<dyn Erro
 | `415 Unsupported Media Type` | `Content-Type: application/json` の欠落・不正 |
 | `422 Unprocessable Entity` | UUID 形式不正、必須フィールド欠落、またはドメイン検証エラー |
 | `500 Internal Server Error` | 予期しないストレージエラー |
+
+> **補足:** 不正な状態遷移で `400 Bad Request` を返しているのは [dddpy](https://github.com/iktakahiro/dddpy) と API 仕様を揃えるためです。新規に設計する REST API では、リクエスト形式は正当でリソースの現在状態と矛盾するケースとして `409 Conflict` や `422 Unprocessable Entity` を返す流派も一般的です。
 
 ## 別のエンティティを追加する手順
 
