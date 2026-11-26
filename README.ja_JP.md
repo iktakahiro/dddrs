@@ -374,6 +374,10 @@ pub trait UnitOfWork: Send {
 #[async_trait]
 pub trait UnitOfWorkFactory: Send + Sync {
     async fn begin(&self) -> Result<Box<dyn UnitOfWork>, RepositoryError>;
+
+    async fn begin_read(&self) -> Result<Box<dyn UnitOfWork>, RepositoryError> {
+        self.begin().await
+    }
 }
 ```
 
@@ -540,7 +544,16 @@ pub async fn connect(url: &str) -> Result<SqlitePool, sqlx::Error> {
 #[async_trait]
 impl UnitOfWorkFactory for SqliteUnitOfWorkFactory {
     async fn begin(&self) -> Result<Box<dyn UnitOfWork>, RepositoryError> {
-        let tx = self.pool.begin().await.map_err(storage)?;
+        let tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(sqlite_error)?;
+        Ok(Box::new(SqliteUnitOfWork { tx }))
+    }
+
+    async fn begin_read(&self) -> Result<Box<dyn UnitOfWork>, RepositoryError> {
+        let tx = self.pool.begin().await.map_err(sqlite_error)?;
         Ok(Box::new(SqliteUnitOfWork { tx }))
     }
 }
@@ -552,11 +565,11 @@ impl UnitOfWork for SqliteUnitOfWork {
     }
 
     async fn commit(self: Box<Self>) -> Result<(), RepositoryError> {
-        self.tx.commit().await.map_err(storage)
+        self.tx.commit().await.map_err(sqlite_error)
     }
 
     async fn rollback(self: Box<Self>) -> Result<(), RepositoryError> {
-        self.tx.rollback().await.map_err(storage)
+        self.tx.rollback().await.map_err(sqlite_error)
     }
 }
 ```
@@ -587,7 +600,7 @@ impl TodoRepository for SqliteTodoRepository<'_> {
             .bind(i64::from(limit))
             .fetch_all(&mut **self.tx)
             .await
-            .map_err(storage)?
+            .map_err(sqlite_error)?
             .into_iter()
             .map(|row| Ok(Snapshot::try_from(row)?.todo))
             .collect()
@@ -606,7 +619,7 @@ impl TodoRepository for SqliteTodoRepository<'_> {
         .bind(expected_version)
         .execute(&mut **self.tx)
         .await
-        .map_err(storage)?;
+        .map_err(sqlite_error)?;
         if result.rows_affected() == 0 {
             return Err(RepositoryError::Conflict);
         }
