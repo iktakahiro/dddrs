@@ -13,19 +13,20 @@ fn workspace_dependencies_point_inward() {
         let name = package["name"].as_str().unwrap();
         let allowed: &[&str] = match name {
             "domain" => &[],
-            "application" | "infrastructure" => &["domain"],
-            "presentation" => &["application", "domain"],
+            "application" => &["domain"],
+            "infrastructure" | "presentation" => &["application", "domain"],
             "server" => &["application", "presentation", "infrastructure", "domain"],
             _ => panic!("Define the dependency boundary for {name}"),
         };
         for dep in package["dependencies"].as_array().unwrap() {
             let target = dep["name"].as_str().unwrap();
+            let is_normal = dep["kind"].is_null();
             match target {
                 "axum" => assert!(matches!(name, "presentation" | "server")),
                 "sqlx" => assert_eq!(name, "infrastructure"),
                 _ => {}
             }
-            if dep["path"].is_string() {
+            if is_normal && dep["path"].is_string() {
                 assert!(
                     allowed.contains(&target),
                     "{name} must not depend on {target}"

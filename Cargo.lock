@@ -21,8 +21,10 @@ dependencies = [
 name = "application"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "domain",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -768,9 +770,12 @@ dependencies = [
 name = "infrastructure"
 version = "0.1.0"
 dependencies = [
+ "application",
  "async-trait",
+ "chrono",
  "domain",
  "sqlx",
+ "tempfile",
  "tokio",
 ]
 
@@ -1058,9 +1063,13 @@ name = "presentation"
 version = "0.1.0"
 dependencies = [
  "application",
+ "async-trait",
  "axum",
  "domain",
  "serde",
+ "serde_json",
+ "tokio",
+ "tower",
 ]
 
 [[package]]

@@ -3,4 +3,4 @@ mod extract;
 mod handlers;
 mod schema;
 
-pub use handlers::router;
+pub use handlers::{TodoUseCases, router};

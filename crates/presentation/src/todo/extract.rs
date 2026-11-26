@@ -40,12 +40,8 @@ impl<S: Send + Sync> FromRequest<S> for TodoInput {
             .await
             .map_err(|e| ApiError(e.status(), e.body_text()))?;
         Ok(Self {
-            title: raw.title.try_into()?,
-            description: raw
-                .description
-                .filter(|s| !s.is_empty())
-                .map(Description::try_from)
-                .transpose()?,
+            title: Title::try_from(raw.title)?,
+            description: Description::from_optional(raw.description)?,
         })
     }
 }

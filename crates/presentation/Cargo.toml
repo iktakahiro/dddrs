@@ -9,3 +9,9 @@ application.workspace = true
 axum.workspace = true
 domain.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tower.workspace = true

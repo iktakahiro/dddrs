@@ -1,7 +1,8 @@
-use super::storage;
-use domain::todo::{
-    self, Completed, Description, InProgress, NotStarted, RepositoryError, Snapshot, StoredTodo,
-    Title, Todo,
+use crate::sqlite::storage;
+use chrono::{DateTime, Utc};
+use domain::{
+    error::RepositoryError,
+    todo::{Description, Snapshot, Title, Todo, TodoState},
 };
 
 #[derive(sqlx::FromRow)]
@@ -16,29 +17,31 @@ pub(super) struct TodoRow {
     version: i64,
 }
 
+fn timestamp_from_millis(millis: i64) -> Result<DateTime<Utc>, RepositoryError> {
+    DateTime::from_timestamp_millis(millis)
+        .ok_or_else(|| RepositoryError::Storage("Invalid stored Todo timestamp".into()))
+}
+
 impl TryFrom<TodoRow> for Snapshot {
     type Error = RepositoryError;
 
     fn try_from(row: TodoRow) -> Result<Self, Self::Error> {
-        let details = todo::Details {
-            id: row.id.parse().map_err(storage)?,
-            title: Title::try_from(row.title).map_err(storage)?,
-            description: row
-                .description
-                .map(Description::try_from)
-                .transpose()
-                .map_err(storage)?,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-        };
-        let todo = match (row.status.as_str(), row.completed_at) {
-            ("not_started", None) => StoredTodo::NotStarted(Todo::restore(details, NotStarted)),
-            ("in_progress", None) => StoredTodo::InProgress(Todo::restore(details, InProgress)),
-            ("completed", Some(at)) => {
-                StoredTodo::Completed(Todo::restore(details, Completed { at }))
-            }
+        let id = row.id.parse().map_err(storage)?;
+        let title = Title::try_from(row.title).map_err(storage)?;
+        let description = Description::from_optional(row.description).map_err(storage)?;
+        let created_at = timestamp_from_millis(row.created_at)?;
+        let updated_at = timestamp_from_millis(row.updated_at)?;
+
+        let state = match (row.status.as_str(), row.completed_at) {
+            ("not_started", None) => TodoState::NotStarted,
+            ("in_progress", None) => TodoState::InProgress,
+            ("completed", Some(at)) => TodoState::Completed {
+                completed_at: timestamp_from_millis(at)?,
+            },
             _ => return Err(RepositoryError::Storage("Invalid stored Todo state".into())),
         };
+
+        let todo = Todo::reconstitute(id, title, description, state, created_at, updated_at);
         Ok(Snapshot {
             todo,
             version: row.version,

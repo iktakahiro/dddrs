@@ -1,7 +1,7 @@
 use crate::error::ApiError;
 use application::todo::UseCaseError;
 use axum::http::StatusCode;
-use domain::todo::{RepositoryError, ValidationError};
+use domain::todo::ValidationError;
 
 impl From<ValidationError> for ApiError {
     fn from(error: ValidationError) -> Self {
@@ -14,8 +14,8 @@ impl From<UseCaseError> for ApiError {
         let status = match &error {
             UseCaseError::NotFound => StatusCode::NOT_FOUND,
             UseCaseError::Transition(_) => StatusCode::BAD_REQUEST,
-            UseCaseError::Repository(RepositoryError::Conflict) => StatusCode::CONFLICT,
-            UseCaseError::Repository(RepositoryError::Storage(cause)) => {
+            UseCaseError::Conflict => StatusCode::CONFLICT,
+            UseCaseError::Unexpected(cause) => {
                 eprintln!("Repository error: {cause}");
                 return Self(
                     StatusCode::INTERNAL_SERVER_ERROR,
