@@ -922,6 +922,16 @@ cargo test --locked -p server --test e2e -- --ignored --nocapture
 
 The test starts the server on an ephemeral loopback port with a temporary SQLite database, executes [`crates/server/tests/e2e/todos.hurl`](crates/server/tests/e2e/todos.hurl) (covering creation, premature completion rejection, update, start, complete, list, delete, and 404 after deletion), and stops the server on exit. The standard workspace test command skips this external-tool test; CI runs it explicitly.
 
+### Dependency Cooldown
+
+[`.cargo/config.toml`](.cargo/config.toml) sets `registry.global-min-publish-age = "7 days"` (stabilized in Cargo 1.100 / RFC 3923) as a lightweight defense against newly published malicious crate releases. Existing versions locked in `Cargo.lock` are unaffected, and older Cargo versions safely ignore the setting.
+
+To intentionally adopt an urgent security patch inside the 7-day window:
+
+```sh
+CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p <crate> --precise <version>
+```
+
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.

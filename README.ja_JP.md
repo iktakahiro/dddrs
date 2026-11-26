@@ -922,6 +922,16 @@ cargo test --locked -p server --test e2e -- --ignored --nocapture
 
 テスト実行時に一時 SQLite データベースと空いているループバックポートでサーバーを起動し、[`crates/server/tests/e2e/todos.hurl`](crates/server/tests/e2e/todos.hurl) のシナリオ（作成・未開始完了の拒否・更新・開始・完了・一覧・削除・削除後の 404）を検証したあと、終了時にサーバーを自動停止します。通常のワークスペーステストでは Hurl は不要で、CI がこのテストを明示的に実行します。
 
+### 依存関係のクールダウン設定
+
+サプライチェーン攻撃対策として、[`.cargo/config.toml`](.cargo/config.toml) に `registry.global-min-publish-age = "7 days"`（Cargo 1.100 / RFC 3923 で安定化）を設定しています。すでに `Cargo.lock` に固定済みのバージョンは維持され、Cargo 1.100 未満の環境でも未知キーとして安全に無視されます。
+
+緊急のセキュリティパッチなど、公開から 7 日未満のバージョンを明示的に適用したい場合は次のように実行します。
+
+```sh
+CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p <crate> --precise <version>
+```
+
 ## ライセンス
 
 このプロジェクトは MIT ライセンスのもとで公開されています。詳細は [LICENSE](LICENSE) を参照してください。
