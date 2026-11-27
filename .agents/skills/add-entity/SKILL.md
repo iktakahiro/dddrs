@@ -35,7 +35,7 @@ Before creating files, note which abstractions are already entity-agnostic:
   - `error.rs`: `UseCaseError` translating `RepositoryError` into `Conflict` / `Unexpected`.
   - One file per operation (`create_project.rs`, `find_project_by_id.rs`, ...) with one `*UseCase` trait and one `*UseCaseImpl` struct (`execute` method only).
   - Use `begin()` for writes and `begin_read()` for reads.
-  - Add in-memory transactional `UnitOfWorkFactory` unit tests (including rollback tests if a use case spans multiple entities, e.g., `project` + `todo`).
+  - `tests.rs` (declared via `#[cfg(test)] mod tests;` in `project.rs`): in-memory transactional `UnitOfWorkFactory` unit tests (including rollback tests if a use case spans multiple entities, e.g., `project` + `todo`).
 
 ### 3. Infrastructure (`crates/infrastructure`)
 - Add a new numbered migration `crates/infrastructure/migrations/000N_projects.sql`:

@@ -25,7 +25,7 @@ Use this skill when adding or changing behavior on an existing entity (such as `
   - Always commit on success and explicitly roll back (`let _ = uow.rollback().await;`) on any error or after finishing a read-only snapshot.
   - Note for Rust Edition 2024 borrow scopes: bind `let res = uow.<repo>().op().await;` to a local variable before matching/branching so the temporary `Box<dyn ...Repository + '_>` borrow drops before calling `uow.rollback().await`.
 - **Error isolation:** Translate `domain::error::RepositoryError` into `<entity>::UseCaseError` (`NotFound`, `Transition`, `Conflict`, `Unexpected`) so `presentation` never depends on `RepositoryError`.
-- **Tests:** Add or update unit tests using the in-memory transactional `UnitOfWorkFactory` in `crates/application/src/<entity>.rs`, verifying happy paths, domain rejections, conflict rollbacks, and application defaults (such as `DEFAULT_LIST_LIMIT`).
+- **Tests:** Add or update unit tests using the in-memory transactional `UnitOfWorkFactory` in `crates/application/src/<entity>/tests.rs` (declared via `#[cfg(test)] mod tests;` in `<entity>.rs` so large mock harnesses stay separate from production code while retaining access to private helpers). Keep compact unit tests inline in `#[cfg(test)] mod tests { ... }` when smaller than the production file.
 
 ## 3. Infrastructure Layer (`crates/infrastructure`)
 
